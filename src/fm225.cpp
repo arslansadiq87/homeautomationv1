@@ -40,7 +40,11 @@ constexpr uint8_t NID_UNKNOWN_ERROR = 0x02;
 constexpr uint8_t NID_OTA_DONE = 0x03;
 constexpr uint8_t NID_EYE_STATE = 0x04;
 
-HardwareSerial *fmSerial = &Serial1;
+// Use a local UART0 instance instead of the optional Serial0 global; some
+// Arduino-ESP32/PlatformIO combinations for ESP32-S3 do not declare Serial0.
+// UART1 is used by the MP3 module and UART2 is used by the LD2410B radar.
+HardwareSerial fm225Serial(0);
+HardwareSerial *fmSerial = &fm225Serial;
 std::vector<uint8_t> rxBuf;
 std::vector<uint16_t> lastUserIds;
 std::map<uint16_t, String> fetchedIdToName;
@@ -548,6 +552,10 @@ void handlePacket(const std::vector<uint8_t> &packet) {
 }
 
 }  // namespace
+
+void begin(uint32_t baud, int rxPin, int txPin) {
+  begin(baud, rxPin, txPin, fm225Serial);
+}
 
 void begin(uint32_t baud, int rxPin, int txPin, HardwareSerial &serial) {
   fmSerial = &serial;

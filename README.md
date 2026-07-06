@@ -176,6 +176,15 @@ Build firmware:
 pio run
 ```
 
+After changing PlatformIO versions or pulling UART/build fixes, clean and rebuild:
+
+```bash
+pio run -t clean
+pio run
+```
+
+The project pins pioarduino `platform-espressif32` `54.03.20` so different machines use the same Arduino-ESP32 3.2.0 based PlatformIO package instead of whatever the latest registry version is.
+
 Upload firmware:
 
 ```bash
@@ -332,6 +341,8 @@ The FM225 module supports:
 - Firmware upgrade command dispatch
 
 Radar-triggered verification can be enabled from settings. When LD2410B presence meets configured distance/energy thresholds, FM225 verification starts and successful verification can pulse the door lock.
+
+FM225 uses a local `HardwareSerial(0)` instance in `src/fm225.cpp` instead of the `Serial0` global. This keeps ESP32-S3 builds portable across Arduino-ESP32 cores where `Serial0` is not declared, while leaving UART1 for the MP3 module and UART2 for the LD2410B radar.
 
 ### Inverter Monitoring
 

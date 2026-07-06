@@ -37,9 +37,9 @@ constexpr uint8_t PIN_DOOR_REED_SWITCH = 7;
 constexpr uint8_t PIN_GARAGE_REED_SWITCH = 42;
 constexpr uint8_t REED_SWITCH_CLOSED_STATE = LOW;
 
-constexpr uint8_t PIN_W25Q128_CS = 21;
+constexpr uint8_t PIN_W25Q128_CS = 21; // ok
 constexpr uint8_t PIN_W25Q128_SCK = 36;
-constexpr uint8_t PIN_W25Q128_MISO = 39;
+constexpr uint8_t PIN_W25Q128_MISO = 39; // ok
 constexpr uint8_t PIN_W25Q128_MOSI = 35;
 constexpr uint32_t W25Q128_SPI_CLOCK_HZ = 10000000;
 constexpr uint32_t W25Q128_EXPECTED_BYTES = 16UL * 1024UL * 1024UL;

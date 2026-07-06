@@ -67,8 +67,8 @@ using ImageCallback = void (*)(const ImageInfo &info);
 
 void begin(uint32_t baud = DEFAULT_BAUD,
            int rxPin = PIN_FM225_RX,
-           int txPin = PIN_FM225_TX,
-           HardwareSerial &serial = Serial0);
+           int txPin = PIN_FM225_TX);
+void begin(uint32_t baud, int rxPin, int txPin, HardwareSerial &serial);
 void loop();
 
 void setLogCallback(LogCallback callback);

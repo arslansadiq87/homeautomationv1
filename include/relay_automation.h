@@ -15,6 +15,56 @@ enum class RelayAutomationDevice : uint8_t {
   MotionLight2 = 3,
 };
 
+enum class RelayChannelMode : uint8_t {
+  Manual = 0,
+  Pulse = 1,
+  Automatic = 2,
+};
+
+enum class RelayAutomaticControlType : uint8_t {
+  Parametric = 0,
+  Schedule = 1,
+};
+
+enum class RelaySensorType : uint8_t {
+  IndoorTemperature = 0,
+  OutdoorTemperature = 1,
+  Humidity = 2,
+  Lux = 3,
+  Mq135 = 4,
+  PirMotion = 5,
+};
+
+enum class RelayComparisonCondition : uint8_t {
+  GreaterThan = 0,
+  LessThan = 1,
+  MotionDetected = 2,
+  NoMotionDetected = 3,
+};
+
+enum class RelayPulseRole : uint8_t {
+  None = 0,
+  GarageDoor = 1,
+  GarageGate = 2,
+};
+
+struct RelayChannelConfig {
+  char name[32] = {};
+  RelayChannelMode mode = RelayChannelMode::Manual;
+  bool showInDashboard = false;
+  bool currentState = false;
+  uint32_t pulseDurationMs = 1000;
+  RelayPulseRole pulseRole = RelayPulseRole::None;
+  RelayAutomaticControlType automaticControlType = RelayAutomaticControlType::Parametric;
+  RelaySensorType sensor = RelaySensorType::IndoorTemperature;
+  RelayComparisonCondition comparison = RelayComparisonCondition::GreaterThan;
+  float onThreshold = 30.0f;
+  float offThreshold = 28.0f;
+  uint16_t scheduleOnMinutes = 480;
+  uint16_t scheduleOffMinutes = 1020;
+  uint8_t enabledWeekdays = 0x7F;
+};
+
 struct RelayAutomationSettings {
   uint32_t doorLockPulseMs = 1000;
   uint32_t garageLockPulseMs = 1000;
@@ -32,6 +82,7 @@ struct RelayAutomationSettings {
   bool exhaustFanManualState = false;
   bool motionLight1ManualState = false;
   bool motionLight2ManualState = false;
+  RelayChannelConfig channels[16];
 };
 
 struct RelayAutomationSnapshot {
@@ -67,7 +118,21 @@ bool relayAutomationPulseDoorLock();
 bool relayAutomationPulseGarageLock();
 
 const char *relayAutomationModeName(RelayAutomationMode mode);
+const char *relayChannelModeName(RelayChannelMode mode);
+const char *relayAutomaticControlTypeName(RelayAutomaticControlType type);
+const char *relaySensorTypeName(RelaySensorType sensor);
+const char *relayComparisonConditionName(RelayComparisonCondition condition);
+const char *relayPulseRoleName(RelayPulseRole role);
 bool relayAutomationParseDevice(const String &value, RelayAutomationDevice &device);
 bool relayAutomationParseMode(const String &value, RelayAutomationMode &mode);
+bool relayAutomationParseChannelMode(const String &value, RelayChannelMode &mode);
+bool relayAutomationParseAutomaticControlType(const String &value, RelayAutomaticControlType &type);
+bool relayAutomationParseSensorType(const String &value, RelaySensorType &sensor);
+bool relayAutomationParseComparisonCondition(const String &value, RelayComparisonCondition &condition);
+bool relayAutomationParsePulseRole(const String &value, RelayPulseRole &role);
+bool relayAutomationChannelEnabled(uint8_t channel);
+bool relayAutomationChannelAllowsPulse(uint8_t channel);
+bool relayAutomationSetChannelManualState(uint8_t channel, bool enabled);
+bool relayAutomationPulseChannel(uint8_t channel);
 
 #endif

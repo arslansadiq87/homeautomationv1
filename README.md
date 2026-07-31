@@ -7,8 +7,8 @@ ESP32-S3 home automation firmware built with PlatformIO and Arduino. The project
 - Target board: ESP32-S3 DevKitC-1
 - Framework: Arduino through PlatformIO
 - Web dashboard: embedded HTTP server on port 80
-- Filesystem: LittleFS for dashboard assets
-- External storage: W25Q128 SPI flash for persistent settings, event logs, RFID tags, and optional cached web assets
+- Web asset storage: raw dashboard files served from external W25Q128 SPI flash
+- External storage: W25Q128 SPI flash for persistent settings, event logs, RFID tags, and dashboard assets
 - Network behavior: non-blocking startup with fallback WiFi access point
 - Secret handling: local credentials are kept in `include/secrets_local.h`, which is ignored by Git
 
@@ -45,7 +45,7 @@ The firmware is designed to keep running even if modules are missing, damaged, d
 - SHT3x reads use a request/read state machine instead of blocking conversion delay.
 - DS18B20 conversion is asynchronous.
 - Missing Winbond flash causes storage operations to fail cleanly while the firmware continues.
-- Missing PCF8574 relay expander keeps logical relay state available and retries detection in the background.
+- Missing MCP23017 relay expander keeps all relay outputs OFF and retries detection in the background.
 
 Some Arduino networking calls are still synchronous internally, but their timeout windows are intentionally short and failures are backed off.
 
@@ -83,14 +83,14 @@ I2C addresses:
 | --- | ---: |
 | BH1750 light sensor | `0x23` |
 | SHT3x temperature/humidity sensor | `0x44` |
-| PCF8574 relay expander default | `0x20` |
+| MCP23017 relay expander | `0x20` |
 
-The PCF8574 address is auto-detected across common ranges.
+The MCP23017 address is fixed at `0x20` (A0, A1, and A2 connected to GND).
 
 ## Project Layout
 
 ```text
-data/                  Web dashboard files for LittleFS
+data/                  Web dashboard source files packed into firmware and seeded to Winbond
 include/               Header files, pinout, and secret defaults
 lib/                   PlatformIO library folder
 src/                   Firmware source
@@ -156,11 +156,11 @@ Example:
 #define HA_FALLBACK_AP_SSID "HomeAutomation-Setup"
 
 #define HA_DEFAULT_SOLAX_ENABLED false
-#define HA_DEFAULT_SOLAX_ADDRESS "http://192.168.100.23/"
+#define HA_DEFAULT_SOLAX_ADDRESS "http://solax.local/"
 #define HA_DEFAULT_SOLAX_PASSWORD "your-solax-password"
 
 #define HA_DEFAULT_NITROX_ENABLED false
-#define HA_DEFAULT_NITROX_HOST "192.168.100.121"
+#define HA_DEFAULT_NITROX_HOST "nitrox.local"
 
 #define HA_DEFAULT_GROWATT_ENABLED false
 #define HA_DEFAULT_GROWATT_TOKEN "your-growatt-token"
@@ -189,12 +189,6 @@ Upload firmware:
 
 ```bash
 pio run --target upload
-```
-
-Upload dashboard files to LittleFS:
-
-```bash
-pio run --target uploadfs
 ```
 
 Open serial monitor:
@@ -243,16 +237,17 @@ The dashboard files are stored in `data/`:
 Normal development flow:
 
 ```bash
-pio run --target uploadfs
+pio run
+pio run --target upload
 ```
 
-The firmware can also seed dashboard assets from LittleFS into the external Winbond flash through:
+At build time, `scripts/generate_web_assets.py` packs the files in `data/` into a generated firmware header. After flashing firmware, seed those packed dashboard assets into the external Winbond flash from the dashboard Settings page or through:
 
 ```text
 POST /api/web-storage/seed
 ```
 
-This lets the dashboard be served from Winbond web storage when available. If Winbond storage is missing or unseeded, LittleFS is used as fallback.
+The HTTP server serves dashboard files directly from raw Winbond records. If Winbond web storage is missing or unseeded, the dashboard returns a seed instruction instead of falling back to an ESP32 filesystem.
 
 ## Persistent Storage
 
@@ -296,7 +291,7 @@ Common endpoints:
 | `/api/settings` | POST | Save configuration |
 | `/api/logs` | GET | Event logs |
 | `/api/restart` | POST | Restart ESP32 |
-| `/api/web-storage/seed` | POST | Copy LittleFS dashboard files into Winbond storage |
+| `/api/web-storage/seed` | POST | Copy firmware-packed dashboard assets into Winbond storage |
 | `/api/relay` | POST | Set relay state |
 | `/api/relay/inching` | POST | Pulse relay for a duration |
 | `/api/automation/status` | GET | Relay automation status |
@@ -311,7 +306,7 @@ Common endpoints:
 
 ### Relays
 
-The relay expander uses PCF8574 over I2C. Relay logic is active-low by default. Relay automation maps:
+The relay expander uses an MCP23017 over I2C with all 16 pins configured as active-high outputs. Channels 0-7 map to GPA0-GPA7 and channels 8-15 map to GPB0-GPB7. At startup, both output banks are cleared before the pins become outputs so all relays remain OFF. Relay automation maps:
 
 | Device | Relay channel |
 | --- | ---: |
@@ -365,6 +360,7 @@ Ignored files include:
 *.env
 include/secrets_local.h
 include/*_local.h
+include/web_assets_generated.h
 ```
 
 Before committing, verify secrets are ignored:
@@ -386,13 +382,7 @@ git push
 
 ### Dashboard does not load
 
-Upload LittleFS:
-
-```bash
-pio run --target uploadfs
-```
-
-Then restart the board and open the printed IP address.
+Open `/api/web-storage/seed` from the Settings page Seed Web Storage action after flashing new firmware. The board serves dashboard files from raw Winbond storage, so the web storage area must be seeded at least once after changing dashboard assets.
 
 ### WiFi does not connect
 
@@ -407,8 +397,9 @@ Then restart the board and open the printed IP address.
 
 ### Relays do not respond
 
-- Check PCF8574 wiring and address jumpers.
-- Confirm relay board active-low/active-high matches `RELAY_ACTIVE_LOW` in `include/pinout.h`.
+- Check MCP23017 SDA on GPIO 8, SCL on GPIO 9, and address `0x20` (A0-A2 to GND).
+- Confirm the MCP23017, both ULN2803A drivers, relay supply, ESP32, and 5 V supply share a common GND.
+- Confirm each ULN2803A COM pin connects to +5 V and each MCP23017 output has its 100 kOhm pull-down to GND.
 
 ### External API data is missing
 

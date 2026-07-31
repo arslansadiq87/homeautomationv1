@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Adafruit_MCP23X17.h>
 #include <DallasTemperature.h>
 #include <OneWire.h>
 #include <SPI.h>
@@ -13,8 +14,9 @@ constexpr uint8_t BH1750_RESET = 0x07;
 constexpr uint8_t BH1750_CONTINUOUS_HIGH_RES = 0x10;
 
 ModuleSnapshot snapshot;
-uint8_t relayLogicalState = 0;
-uint8_t pcf8574Address = I2C_ADDRESS_PCF8574;
+Adafruit_MCP23X17 relayExpander;
+uint16_t relayLogicalState = 0;
+bool relayExpanderDriverStarted = false;
 bool inchingActive[RELAY_CHANNEL_COUNT] = {};
 uint32_t inchingEndsAt[RELAY_CHANNEL_COUNT] = {};
 uint32_t lastI2cResetMs = 0;
@@ -80,72 +82,48 @@ bool probeAddress(uint8_t address) {
   return result == 0;
 }
 
-uint8_t relayPhysicalState() {
-  return RELAY_ACTIVE_LOW ? static_cast<uint8_t>(~relayLogicalState) : relayLogicalState;
-}
-
 bool writeRelayState() {
-  if (!snapshot.pcf8574Online || pcf8574Address == 0) {
-    snapshot.relayState = relayLogicalState;
+  snapshot.relayState = relayLogicalState;
+  if (!snapshot.mcp23017Online) {
     return false;
   }
 
-  Wire.beginTransmission(pcf8574Address);
-  Wire.write(relayPhysicalState());
-  const uint8_t result = Wire.endTransmission();
-  const bool ok = result == 0;
-  if (result != 0 && result != 2) {
-    recoverI2cBus();
+  if (!probeAddress(I2C_ADDRESS_MCP23017)) {
+    snapshot.mcp23017Online = false;
+    snapshot.mcp23017Address = 0;
+    return false;
   }
-  snapshot.pcf8574Online = ok;
-  snapshot.pcf8574Address = ok ? pcf8574Address : 0;
-  snapshot.relayState = relayLogicalState;
-  return ok;
+
+  relayExpander.writeGPIOAB(relayLogicalState);
+  return true;
 }
 
-bool isKnownNonPcfAddress(uint8_t address) {
-  return address == I2C_ADDRESS_BH1750 || address == I2C_ADDRESS_SHT3X;
-}
+bool initializeMcp23017() {
+  snapshot.mcp23017Online = false;
+  snapshot.mcp23017Address = 0;
 
-bool detectPcf8574Address() {
-  const uint8_t ranges[][2] = {
-    {0x20, 0x27},
-    {0x38, 0x3F},
-  };
-
-  if (!PCF8574_AUTO_DETECT_ADDRESS && probeAddress(I2C_ADDRESS_PCF8574)) {
-    pcf8574Address = I2C_ADDRESS_PCF8574;
-    snapshot.pcf8574Online = true;
-    snapshot.pcf8574Address = pcf8574Address;
-    return true;
-  }
-
-  if (probeAddress(I2C_ADDRESS_PCF8574) && !isKnownNonPcfAddress(I2C_ADDRESS_PCF8574)) {
-    pcf8574Address = I2C_ADDRESS_PCF8574;
-    snapshot.pcf8574Online = true;
-    snapshot.pcf8574Address = pcf8574Address;
-    return true;
-  }
-
-  for (const auto &range : ranges) {
-    for (uint8_t address = range[0]; address <= range[1]; address++) {
-      if (address == I2C_ADDRESS_PCF8574 || isKnownNonPcfAddress(address)) {
-        continue;
-      }
-
-      if (probeAddress(address)) {
-        pcf8574Address = address;
-        snapshot.pcf8574Online = true;
-        snapshot.pcf8574Address = pcf8574Address;
-        return true;
-      }
+  if (!relayExpanderDriverStarted) {
+    relayExpanderDriverStarted = true;
+    if (!relayExpander.begin_I2C(I2C_ADDRESS_MCP23017, &Wire)) {
+      return false;
     }
+  } else if (!probeAddress(I2C_ADDRESS_MCP23017)) {
+    return false;
   }
 
-  pcf8574Address = 0;
-  snapshot.pcf8574Online = false;
-  snapshot.pcf8574Address = 0;
-  return false;
+  // Clear both output latches before changing any pin to an output. With the
+  // external pull-downs this keeps every ULN2803A input LOW during startup.
+  relayLogicalState = 0;
+  relayExpander.writeGPIOAB(0x0000);
+  for (uint8_t pin = 0; pin < RELAY_CHANNEL_COUNT; pin++) {
+    relayExpander.pinMode(pin, OUTPUT);
+    relayExpander.digitalWrite(pin, LOW);
+  }
+
+  snapshot.relayState = 0;
+  snapshot.mcp23017Online = true;
+  snapshot.mcp23017Address = I2C_ADDRESS_MCP23017;
+  return true;
 }
 
 uint8_t sht3xCrc8(const uint8_t *data, size_t length) {
@@ -276,9 +254,9 @@ void serviceInchingRelays() {
   }
 }
 
-void refreshPcf8574() {
+void refreshMcp23017() {
   static uint32_t lastCheck = 0;
-  if (snapshot.pcf8574Online) {
+  if (snapshot.mcp23017Online) {
     return;
   }
 
@@ -287,10 +265,10 @@ void refreshPcf8574() {
   }
 
   lastCheck = millis();
-  if (detectPcf8574Address()) {
-    writeRelayState();
-    Serial.print("PCF8574 relay expander detected at 0x");
-    Serial.println(pcf8574Address, HEX);
+  if (initializeMcp23017()) {
+    Serial.print("MCP23017 relay expander detected at 0x");
+    Serial.println(I2C_ADDRESS_MCP23017, HEX);
+    Serial.println("All 16 relays forced OFF");
   }
 }
 
@@ -338,17 +316,24 @@ bool applyRelaySet(uint8_t channel, bool enabled, bool clearInchingTimer) {
     return false;
   }
 
+  const uint16_t previousState = relayLogicalState;
   if (enabled) {
-    relayLogicalState |= static_cast<uint8_t>(1U << channel);
+    relayLogicalState |= static_cast<uint16_t>(1U << channel);
   } else {
-    relayLogicalState &= static_cast<uint8_t>(~(1U << channel));
+    relayLogicalState &= static_cast<uint16_t>(~(1U << channel));
   }
 
   if (clearInchingTimer) {
     inchingActive[channel] = false;
   }
 
-  return writeRelayState();
+  if (writeRelayState()) {
+    return true;
+  }
+
+  relayLogicalState = previousState;
+  snapshot.relayState = relayLogicalState;
+  return false;
 }
 
 void storageSelect() {
@@ -484,12 +469,12 @@ void modulesBegin() {
   }
 
   relayLogicalState = 0;
-  if (detectPcf8574Address()) {
-    writeRelayState();
-    Serial.print("PCF8574 relay expander detected at 0x");
-    Serial.println(pcf8574Address, HEX);
+  if (initializeMcp23017()) {
+    Serial.print("MCP23017 relay expander detected at 0x");
+    Serial.println(I2C_ADDRESS_MCP23017, HEX);
+    Serial.println("All 16 relays forced OFF");
   } else {
-    Serial.println("PCF8574 relay expander not detected on 0x20-0x27 or 0x38-0x3F");
+    Serial.println("MCP23017 relay expander not detected at 0x20; all relays remain OFF via pull-downs");
   }
 
   initBh1750();
@@ -506,7 +491,7 @@ void modulesBegin() {
 
 void modulesLoop() {
   serviceInchingRelays();
-  refreshPcf8574();
+  refreshMcp23017();
   readSht3x();
   serviceDs18b20();
   serviceBuzzer();
@@ -521,7 +506,7 @@ void modulesLoop() {
 
 ModuleSnapshot modulesGetSnapshot() {
   snapshot.relayState = relayLogicalState;
-  snapshot.pcf8574Address = snapshot.pcf8574Online ? pcf8574Address : 0;
+  snapshot.mcp23017Address = snapshot.mcp23017Online ? I2C_ADDRESS_MCP23017 : 0;
   return snapshot;
 }
 
@@ -545,7 +530,7 @@ bool relayGet(uint8_t channel) {
   return (relayLogicalState & (1U << channel)) != 0;
 }
 
-uint8_t relayGetState() {
+uint16_t relayGetState() {
   return relayLogicalState;
 }
 

@@ -9,20 +9,37 @@ const panels = {
   rfid: document.querySelector("#rfidPanel")
 };
 
-const connectionStatus = document.querySelector("#connectionStatus");
 const settingsForm = document.querySelector("#settingsForm");
 const settingsMessage = document.querySelector("#settingsMessage");
-const connectionLabel = document.querySelector("#connectionLabel");
+const relaySettingsGrid = document.querySelector("#relaySettingsGrid");
+const priorityRelayDashboardGrid = document.querySelector("#priorityRelayDashboardGrid");
+const relayDashboardGrid = document.querySelector("#relayDashboardGrid");
 const restartDeviceButton = document.querySelector("#restartDeviceButton");
 const loadLogsButton = document.querySelector("#loadLogsButton");
 const mp3Buttons = document.querySelectorAll(".mp3-action");
 const fm225Buttons = document.querySelectorAll(".fm225-action");
 const rfidButtons = document.querySelectorAll(".rfid-action");
-const webStorageButtons = document.querySelectorAll(".web-storage-action");
-const automationModeButtons = document.querySelectorAll(".automation-mode-option");
-const manualRelayCards = document.querySelectorAll(".manual-relay-card");
-const lockCards = document.querySelectorAll(".lock-card");
+const rs485TestSendButton = document.querySelector("#rs485TestSendButton");
+const canTestSendButton = document.querySelector("#canTestSendButton");
 const lockPulseTimers = {};
+let latestRelayConfigs = [];
+let statusRefreshInFlight = false;
+let pendingStatusRefresh = false;
+const relayActionInFlight = new Set();
+const relayOptimisticState = new Map();
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 1200) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function setText(id, value) {
   const element = document.querySelector(`#${id}`);
@@ -168,9 +185,27 @@ function formatState(active, activeLabel, idleLabel) {
 }
 
 function updateConnection(status, label) {
-  connectionStatus.classList.remove("online", "offline");
-  connectionStatus.classList.add(status);
-  connectionLabel.textContent = label;
+  setText("esp32NetworkSummary", label || (status === "online" ? "Controller API online" : "Controller API offline"));
+  setText("esp32WifiStatus", status === "online" ? "Online" : "Offline");
+}
+
+function updateEsp32Status(status) {
+  const esp32Temperature = Number.isFinite(status.esp32Temperature)
+    ? status.esp32Temperature
+    : status.internalTemperature;
+  const formattedTemperature = formatNumber(esp32Temperature, 1, "C");
+  const wifiOnline = Boolean(status.wifiConnected);
+
+  setText("esp32HeaderTemperature", formattedTemperature);
+  setText("esp32AboutTemperature", formattedTemperature);
+  setText("esp32Firmware", status.firmware || "--");
+  setText("esp32NetworkSummary", wifiOnline ? `${status.ip || "--"} on WiFi` : "WiFi offline");
+  setText("esp32WifiStatus", wifiOnline ? "Online" : "Offline");
+  setText("esp32IpAddress", status.ip || "--");
+  setText("esp32Rssi", Number.isFinite(status.rssi) ? `${status.rssi} dBm` : "--");
+  setText("esp32FreeHeap", formatBytes(status.freeHeap));
+  setText("esp32Uptime", formatUptime(status.uptimeSeconds || 0));
+  setText("esp32StorageStatus", status.storageOnline ? "Online" : "Offline");
 }
 
 function updateMp3Status(status) {
@@ -283,8 +318,61 @@ function updateTdsStatus(status) {
   }
 }
 
+function updateAirPurifierStatus(status) {
+  const enabled = Boolean(status.airPurifierEnabled);
+  const online = Boolean(status.airPurifierOnline);
+  const pm25 = status.airPurifierPm25;
+  const pm1 = status.airPurifierPm1;
+  const pm10 = status.airPurifierPm10;
+  const card = document.querySelector("#airPurifierCard");
+  const gauge = document.querySelector("#airPurifierGauge");
+  setHidden("airPurifierCard", !enabled);
+  if (!enabled) {
+    return;
+  }
+
+  const pm25Value = Number.isFinite(pm25) ? clampNumber(pm25, 0, 500) : 0;
+  setText("airPurifierStatus", online ? (status.airPurifierOn ? "Purifying" : "Online") : status.airPurifierLastEvent || "Offline");
+  setText("airPurifierPm25", Number.isFinite(pm25) ? `${Math.round(pm25)}` : "--");
+  setText("airPurifierPm1", Number.isFinite(pm1) ? `${Math.round(pm1)}` : "--");
+  setText("airPurifierPm10", Number.isFinite(pm10) ? `${Math.round(pm10)}` : "--");
+  setText("airPurifierFan", status.airPurifierFanOn ? `${status.airPurifierFanSpeedPct || 0}%` : "Off");
+  setText("airPurifierPower", status.airPurifierOn ? "ON" : "OFF");
+  setCardState("airPurifierCard", online && status.airPurifierOn);
+  if (card) {
+    card.style.setProperty("--air-quality", `${(pm25Value / 500) * 360}deg`);
+  }
+  if (gauge) {
+    if (Number.isFinite(pm25)) {
+      gauge.setAttribute("aria-valuenow", `${Math.round(pm25Value)}`);
+      gauge.setAttribute("aria-valuetext", `${Math.round(pm25)} PM2.5`);
+    } else {
+      gauge.removeAttribute("aria-valuenow");
+      gauge.setAttribute("aria-valuetext", "PM2.5 unavailable");
+    }
+  }
+}
+
+function updateCommunicationStatus(status) {
+  setText("rs485StatusText", status.rs485Enabled ? status.rs485Status || "Ready" : "Disabled");
+  setText("rs485RxPinText", `GPIO${status.rs485RxPin ?? 15}`);
+  setText("rs485TxPinText", `GPIO${status.rs485TxPin ?? 18}`);
+  setText("rs485DirectionPinText", `GPIO${status.rs485DirectionPin ?? 48}`);
+  setText("canStatusText", status.canEnabled ? status.canStatus || "Ready" : "Disabled");
+  setText("canTxPinText", `GPIO${status.canTxPin ?? 5}`);
+  setText("canRxPinText", `GPIO${status.canRxPin ?? 6}`);
+}
+
 function updateInverterCard(prefix, status, label) {
   const enabled = status[`${prefix}Enabled`] !== false;
+  setHidden(`${prefix}InverterCard`, !enabled);
+  if (!enabled) {
+    setFlowDot(`${prefix}PvInverterDot`, false, 0);
+    setFlowDot(`${prefix}GridInverterDot`, false, 0);
+    setFlowDot(`${prefix}InverterHomeDot`, false, 0);
+    setFlowDot(`${prefix}BatteryInverterDot`, false, 0);
+    return;
+  }
   const online = Boolean(status[`${prefix}Online`]);
   const pv = status[`${prefix}PvPowerW`];
   const grid = status[`${prefix}GridPowerW`];
@@ -325,6 +413,10 @@ function updateInverterStatus(status) {
 
 function updateGrowattCard(status) {
   const enabled = status.growattEnabled !== false;
+  setHidden("growattInverterCard", !enabled);
+  if (!enabled) {
+    return;
+  }
   const online = Boolean(status.growattOnline);
   const eventText = status.growattLastEvent || "Waiting for Growatt data";
 
@@ -500,6 +592,9 @@ function updateRfidStatus(status) {
 }
 
 function modeLabel(mode) {
+  if (mode === "pulse") {
+    return "Pulse";
+  }
   return mode === "automatic" ? "Automatic" : "Manual";
 }
 
@@ -519,27 +614,6 @@ function formatDurationMs(milliseconds) {
     return `${milliseconds}ms`;
   }
   return `${Math.round(milliseconds / 1000)}s`;
-}
-
-function setRelayModeControl(device, mode) {
-  const normalizedMode = mode || "manual";
-  const card = document.querySelector(`.manual-relay-card[data-device="${device}"]`);
-  if (card) {
-    card.dataset.mode = normalizedMode;
-    card.classList.toggle("manual-mode", normalizedMode === "manual");
-    card.classList.toggle("automatic-mode", normalizedMode === "automatic");
-  }
-
-  document.querySelectorAll(`.automation-mode-option[data-device="${device}"]`).forEach((button) => {
-    const selected = button.dataset.mode === normalizedMode;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-pressed", selected ? "true" : "false");
-  });
-}
-
-function updateRelayCardUI(device, cardId, enabled, mode) {
-  setCardState(cardId, enabled);
-  setRelayModeControl(device, mode);
 }
 
 function setLockCardPulsing(cardId, pulsing, remainingMs = 0) {
@@ -564,85 +638,308 @@ function setLockCardPulsing(cardId, pulsing, remainingMs = 0) {
   }
 }
 
-function updateLockCardUI(cardId, stateId, statusId, active, remainingMs, pulseMs) {
-  const card = document.querySelector(`#${cardId}`);
-  if (card) {
-    card.dataset.pulseMs = Number.isFinite(pulseMs) && pulseMs > 0 ? `${pulseMs}` : card.dataset.pulseMs || "1000";
-  }
-
-  setText(stateId, active ? "UNLOCKING" : "OFF");
-  setText(statusId, active ? `Unlock pulse ${formatDurationMs(remainingMs)} remaining` : "Momentary unlock ready");
-  setCardState(cardId, active);
-  setLockCardPulsing(cardId, active, remainingMs);
-}
-
-function setLockCardPendingText(cardId) {
-  if (cardId === "doorLockCard") {
-    setText("doorLockState", "UNLOCKING");
-    setText("doorLockStatus", "Unlock pulse active...");
-  } else if (cardId === "garageLockCard") {
-    setText("garageLockState", "UNLOCKING");
-    setText("garageLockStatus", "Unlock pulse active...");
-  }
-}
-
 function updateAutomationStatus(status) {
-  updateLockCardUI(
-    "doorLockCard",
-    "doorLockState",
-    "doorLockStatus",
-    Boolean(status.doorLockOn || status.doorLockRemainingMs > 0),
-    status.doorLockRemainingMs,
-    status.doorLockPulseMs
-  );
-  setText("doorReedStatus", doorStatusLabel(Boolean(status.doorReedClosed)));
+  if (Array.isArray(status.relayConfigs)) {
+    latestRelayConfigs = status.relayConfigs;
+    renderDashboardRelays(status);
+  }
+}
 
-  updateLockCardUI(
-    "garageLockCard",
-    "garageLockState",
-    "garageLockStatus",
-    Boolean(status.garageLockOn || status.garageLockRemainingMs > 0),
-    status.garageLockRemainingMs,
-    status.garageLockPulseMs
-  );
-  setText("garageReedStatus", doorStatusLabel(Boolean(status.garageReedClosed)));
+function minutesToTime(value) {
+  const minutes = Number.isFinite(Number(value)) ? Number(value) : 0;
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
 
-  setText("outdoorLightState", relayStateLabel(status.outdoorLightOn));
-  setText(
-    "outdoorLightStatus",
-    `${modeLabel(status.outdoorLightMode)}, lux ${Number.isFinite(status.lux) ? status.lux.toFixed(1) : "--"}`
-  );
-  updateRelayCardUI("outdoorLight", "outdoorLightCard", status.outdoorLightOn, status.outdoorLightMode);
+function timeToMinutes(value) {
+  const [hours, minutes] = String(value || "00:00").split(":").map((part) => Number(part));
+  return clampNumber((hours || 0) * 60 + (minutes || 0), 0, 1439);
+}
 
-  setText("exhaustFanState", relayStateLabel(status.exhaustFanOn));
-  setText(
-    "exhaustFanStatus",
-    `${modeLabel(status.exhaustFanMode)}, temp ${Number.isFinite(status.temperature) ? status.temperature.toFixed(1) : "--"} C`
-  );
-  updateRelayCardUI("exhaustFan", "exhaustFanCard", status.exhaustFanOn, status.exhaustFanMode);
+function sensorLabel(sensor) {
+  return {
+    indoorTemperature: "Inside temperature",
+    outdoorTemperature: "Outside temperature",
+    humidity: "Humidity",
+    lux: "Lux",
+    mq135: "MQ135",
+    pir: "PIR motion"
+  }[sensor] || "Sensor";
+}
 
-  setText("motionLight1State", relayStateLabel(status.motionLight1On));
-  setText(
-    "motionLight1Status",
-    `${modeLabel(status.motionLight1Mode)}, ${status.motion1Active ? "motion" : "quiet"}, hold ${formatDurationMs(
-      status.motionLight1RemainingMs
-    )}`
-  );
-  updateRelayCardUI("motionLight1", "motionLight1Card", status.motionLight1On, status.motionLight1Mode);
+function comparisonLabel(comparison) {
+  return {
+    greaterThan: "Greater than",
+    lessThan: "Less than",
+    motionDetected: "Motion detected",
+    noMotionDetected: "No motion detected"
+  }[comparison] || "Greater than";
+}
 
-  setText("motionLight2State", relayStateLabel(status.motionLight2On));
-  setText(
-    "motionLight2Status",
-    `${modeLabel(status.motionLight2Mode)}, ${status.motion2Active ? "motion" : "quiet"}, hold ${formatDurationMs(
-      status.motionLight2RemainingMs
-    )}`
-  );
-  updateRelayCardUI("motionLight2", "motionLight2Card", status.motionLight2On, status.motionLight2Mode);
+function relaySensorValue(config, status) {
+  if (config.sensor === "lux") {
+    return formatNumber(status.lux, 1, "lx");
+  }
+  if (config.sensor === "mq135") {
+    return `Raw ${status.mq135AnalogRaw ?? "--"}`;
+  }
+  if (config.sensor === "pir") {
+    return status.motion1Active || status.motion2Active ? "Motion" : "Quiet";
+  }
+  if (config.sensor === "outdoorTemperature") {
+    return formatNumber(status.ds18b20Temperature, 1, "C");
+  }
+  if (config.sensor === "humidity") {
+    return Number.isFinite(status.humidity) ? `${Math.round(status.humidity)}% RH` : "--";
+  }
+  return formatNumber(status.temperature, 1, "C");
+}
+
+function updatePulseRoleOptions() {
+  const selects = Array.from(document.querySelectorAll('select[name$="PulseRole"]'));
+  ["garageDoor", "garageGate"].forEach((role) => {
+    const selected = selects.find((select) => select.value === role);
+    selects.forEach((select) => {
+      const option = Array.from(select.options).find((item) => item.value === role);
+      if (option) {
+        option.disabled = Boolean(selected && selected !== select);
+      }
+    });
+  });
+}
+
+function dashboardRelayDetail(config, status) {
+  if (config.pulseRole === "garageDoor") {
+    return doorStatusLabel(Boolean(status.doorReedClosed));
+  }
+  if (config.pulseRole === "garageGate") {
+    return doorStatusLabel(Boolean(status.garageReedClosed));
+  }
+  if (config.mode === "pulse") {
+    return `Pulse ${formatDurationMs(config.pulseDurationMs)}`;
+  }
+  if (config.mode === "automatic" && config.automaticControlType === "schedule") {
+    return `Schedule ${minutesToTime(config.scheduleOnMinutes)}-${minutesToTime(config.scheduleOffMinutes)}`;
+  }
+  if (config.mode === "automatic") {
+    return `Automatic, ${sensorLabel(config.sensor)} ${relaySensorValue(config, status)}`;
+  }
+  return "Manual mode";
+}
+
+function renderDashboardRelays(status) {
+  if (!relayDashboardGrid || !priorityRelayDashboardGrid) {
+    return;
+  }
+
+  const visible = latestRelayConfigs.filter((config) => config.showInDashboard || config.pulseRole === "garageDoor" || config.pulseRole === "garageGate");
+  const priorityRelays = visible.filter((config) => config.mode === "pulse" && (config.pulseRole === "garageDoor" || config.pulseRole === "garageGate"));
+  const remainingRelays = visible.filter((config) => !priorityRelays.includes(config));
+  const renderRelaySet = (container, configs) => {
+    container.textContent = "";
+    configs.forEach((config) => {
+      container.append(createDashboardRelayCard(config, status));
+    });
+  };
+
+  renderRelaySet(priorityRelayDashboardGrid, priorityRelays);
+  renderRelaySet(relayDashboardGrid, remainingRelays);
+}
+
+function createDashboardRelayCard(config, status) {
+  const channel = Number(config.channel);
+  const active = relayOptimisticState.has(channel)
+    ? relayOptimisticState.get(channel)
+    : Boolean(status.relays?.[channel] ?? config.currentState);
+  const isRolePulse = config.mode === "pulse" && (config.pulseRole === "garageDoor" || config.pulseRole === "garageGate");
+  const card = document.createElement("article");
+  card.className = `metric-card relay-card dashboard-relay-card ${isRolePulse ? "lock-card" : ""} ${
+    config.mode === "automatic" ? "automatic-mode" : ""
+  }`;
+  card.id = `relayDashboardCard${channel}`;
+  card.dataset.state = active ? "on" : "off";
+  card.classList.toggle("busy", relayActionInFlight.has(channel));
+
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const name = document.createElement("span");
+  name.textContent = config.name || `Relay ${channel + 1}`;
+  const state = document.createElement("strong");
+  state.textContent = relayStateLabel(active);
+  meta.append(name, state);
+
+  const detail = document.createElement("p");
+  if (isRolePulse) {
+    detail.className = "door-status";
+  }
+  detail.textContent = dashboardRelayDetail(config, status);
+  card.append(meta, detail);
+
+  if (isRolePulse) {
+    card.dataset.pulseMs = `${config.pulseDurationMs || 1000}`;
+    card.classList.toggle("pulsing", active);
+    card.classList.toggle("busy", active || relayActionInFlight.has(channel));
+    if (active) {
+      state.textContent = "UNLOCKING";
+    }
+    card.addEventListener("click", () => {
+      if (!card.classList.contains("busy")) {
+        pulseDashboardRelay(channel, card);
+      }
+    });
+  } else if (config.mode === "manual") {
+    card.classList.add("clickable-relay-card");
+    card.setAttribute("role", "button");
+    card.setAttribute("tabindex", "0");
+    card.setAttribute("aria-label", `${active ? "Turn off" : "Turn on"} ${name.textContent}`);
+    card.addEventListener("click", () => setDashboardRelay(channel, !active));
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        setDashboardRelay(channel, !active);
+      }
+    });
+  } else if (config.mode === "pulse") {
+    card.classList.add("clickable-relay-card");
+    card.setAttribute("role", "button");
+    card.setAttribute("tabindex", active || relayActionInFlight.has(channel) ? "-1" : "0");
+    card.setAttribute("aria-label", `Activate ${name.textContent}`);
+    card.classList.toggle("busy", active || relayActionInFlight.has(channel));
+    card.addEventListener("click", () => {
+      if (!card.classList.contains("busy")) {
+        pulseDashboardRelay(channel, card);
+      }
+    });
+    card.addEventListener("keydown", (event) => {
+      if ((event.key === "Enter" || event.key === " ") && !card.classList.contains("busy")) {
+        event.preventDefault();
+        pulseDashboardRelay(channel, card);
+      }
+    });
+  } else {
+    const auto = document.createElement("small");
+    auto.textContent =
+      config.automaticControlType === "schedule"
+        ? `Days mask ${config.enabledWeekdays}`
+        : `${comparisonLabel(config.comparison)}, ON ${config.onThreshold}, OFF ${config.offThreshold}`;
+    card.append(auto);
+  }
+
+  return card;
+}
+
+function requestStatusRefresh(delayMs = 250) {
+  window.setTimeout(refreshStatus, delayMs);
+}
+
+function markRelayCardBusy(channel, busy) {
+  document.querySelectorAll(`#relayDashboardCard${channel}`).forEach((card) => {
+    card.classList.toggle("busy", busy);
+    if (card.classList.contains("clickable-relay-card")) {
+      card.setAttribute("aria-busy", busy ? "true" : "false");
+    }
+  });
+}
+
+function setRelayCardLocalState(channel, enabled) {
+  relayOptimisticState.set(channel, enabled);
+  document.querySelectorAll(`#relayDashboardCard${channel}`).forEach((card) => {
+    card.dataset.state = enabled ? "on" : "off";
+    card.classList.toggle("active", enabled);
+    const state = card.querySelector(".card-meta strong");
+    if (state) {
+      state.textContent = card.classList.contains("lock-card") && enabled ? "UNLOCKING" : relayStateLabel(enabled);
+    }
+    const name = card.querySelector(".card-meta span")?.textContent || `Relay ${channel + 1}`;
+    if (card.classList.contains("clickable-relay-card") && !card.classList.contains("lock-card")) {
+      card.setAttribute("aria-label", `${enabled ? "Turn off" : "Turn on"} ${name}`);
+    }
+  });
+}
+
+async function postRelayControl(endpoint, channel, enabled) {
+  const payload = new URLSearchParams();
+  payload.set("channel", channel);
+  if (typeof enabled === "boolean") {
+    payload.set("enabled", enabled ? "true" : "false");
+  }
+  const response = await fetchWithTimeout(`/api/relay/${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: payload,
+    cache: "no-store"
+  }, 2000);
+  if (!response.ok) {
+    throw new Error(`Relay action failed: ${response.status}`);
+  }
+  const result = await response.json();
+  if (!result.ok) {
+    throw new Error("Relay action rejected");
+  }
+  return result;
+}
+
+function setDashboardRelay(channel, enabled) {
+  if (relayActionInFlight.has(channel)) {
+    return;
+  }
+  relayActionInFlight.add(channel);
+  const previousState = !enabled;
+  setRelayCardLocalState(channel, enabled);
+  markRelayCardBusy(channel, true);
+
+  postRelayControl("manual", channel, enabled)
+    .catch(() => {
+      setRelayCardLocalState(channel, previousState);
+      updateConnection("offline", "Relay failed");
+    })
+    .finally(() => {
+      relayActionInFlight.delete(channel);
+      markRelayCardBusy(channel, false);
+      requestStatusRefresh(250);
+      window.setTimeout(() => relayOptimisticState.delete(channel), 1200);
+    });
+}
+
+function pulseDashboardRelay(channel, card = null) {
+  if (relayActionInFlight.has(channel)) {
+    return;
+  }
+  relayActionInFlight.add(channel);
+  if (card) {
+    const pulseMs = Number.parseInt(card.dataset.pulseMs || "1000", 10);
+    setLockCardPulsing(card.id, true, Number.isFinite(pulseMs) ? pulseMs : 1000);
+  }
+  markRelayCardBusy(channel, true);
+  setRelayCardLocalState(channel, true);
+
+  postRelayControl("pulse", channel)
+    .catch(() => {
+      if (card) {
+        setLockCardPulsing(card.id, false);
+      }
+      setRelayCardLocalState(channel, false);
+      updateConnection("offline", "Relay failed");
+    })
+    .finally(() => {
+      const pulseMs = card ? Number.parseInt(card.dataset.pulseMs || "1000", 10) : 1000;
+      window.setTimeout(() => {
+        relayActionInFlight.delete(channel);
+        relayOptimisticState.delete(channel);
+        markRelayCardBusy(channel, false);
+        requestStatusRefresh(0);
+      }, Number.isFinite(pulseMs) ? Math.min(Math.max(pulseMs, 300), 3000) : 1000);
+    });
 }
 
 async function refreshStatus() {
+  if (statusRefreshInFlight) {
+    pendingStatusRefresh = true;
+    return;
+  }
+  statusRefreshInFlight = true;
+  pendingStatusRefresh = false;
   try {
-    const response = await fetch("/api/status", { cache: "no-store" });
+    const response = await fetchWithTimeout("/api/status", { cache: "no-store" }, 1200);
     if (!response.ok) {
       throw new Error(`Status API failed: ${response.status}`);
     }
@@ -716,6 +1013,8 @@ async function refreshStatus() {
     updateMp3Status(status);
     updateRadarStatus(status);
     updateTdsStatus(status);
+    updateAirPurifierStatus(status);
+    updateCommunicationStatus(status);
     updateInverterStatus(status);
     updateFm225Status(status);
     updateRfidStatus(status);
@@ -725,76 +1024,16 @@ async function refreshStatus() {
     setText("wifiRssi", `${status.rssi} dBm`);
     setText("freeHeap", `${Math.round(status.freeHeap / 1024)} KB`);
     setText("uptime", formatUptime(status.uptimeSeconds));
-    updateConnection(status.wifiConnected ? "online" : "offline", status.wifiConnected ? "Online" : "WiFi offline");
+    updateEsp32Status(status);
   } catch (error) {
     updateConnection("offline", "API offline");
-  }
-}
-
-async function postAutomation(endpoint, payload = new URLSearchParams()) {
-  automationModeButtons.forEach((button) => {
-    button.disabled = true;
-  });
-  manualRelayCards.forEach((card) => {
-    card.classList.add("busy");
-  });
-
-  try {
-    const response = await fetch(`/api/automation/${endpoint}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: payload,
-      cache: "no-store"
-    });
-
-    if (!response.ok) {
-      throw new Error(`Automation action failed: ${response.status}`);
-    }
-
-    await refreshStatus();
-  } catch (error) {
-    updateConnection("offline", "Automation failed");
   } finally {
-    automationModeButtons.forEach((button) => {
-      button.disabled = false;
-    });
-    manualRelayCards.forEach((card) => {
-      card.classList.remove("busy");
-    });
-  }
-}
-
-async function postLockPulse(card) {
-  if (card.classList.contains("busy")) {
-    return;
-  }
-
-  const pulseMs = Number.parseInt(card.dataset.pulseMs || "1000", 10);
-  setLockCardPulsing(card.id, true, Number.isFinite(pulseMs) ? pulseMs : 1000);
-  setLockCardPendingText(card.id);
-
-  try {
-    const response = await fetch(`/api/automation/${card.dataset.lockEndpoint}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      cache: "no-store"
-    });
-
-    if (!response.ok) {
-      throw new Error(`Lock pulse failed: ${response.status}`);
+    statusRefreshInFlight = false;
+    if (pendingStatusRefresh) {
+      pendingStatusRefresh = false;
+      window.setTimeout(refreshStatus, 150);
     }
-
-    await refreshStatus();
-  } catch (error) {
-    setLockCardPulsing(card.id, false);
-    updateConnection("offline", "Lock pulse failed");
   }
-}
-
-function automationPayload(device) {
-  const payload = new URLSearchParams();
-  payload.set("device", device);
-  return payload;
 }
 
 async function runRfidAction(action, tag = "") {
@@ -835,39 +1074,6 @@ async function runRfidAction(action, tag = "") {
     setText("rfidActionState", "Command failed");
   } finally {
     rfidButtons.forEach((button) => {
-      button.disabled = false;
-    });
-  }
-}
-
-async function runWebStorageAction(action) {
-  if (action !== "seed") {
-    return;
-  }
-
-  webStorageButtons.forEach((button) => {
-    button.disabled = true;
-  });
-  setText("webStorageSettingsEvent", "Seeding...");
-
-  try {
-    const response = await fetch("/api/web-storage/seed", {
-      method: "POST",
-      cache: "no-store"
-    });
-
-    const result = await response.json();
-    if (!response.ok || !result.ok) {
-      throw new Error(result.lastEvent || `Seed failed: ${response.status}`);
-    }
-
-    setText("webStorageSettingsState", `${result.fileCount || 0} files`);
-    setText("webStorageSettingsEvent", result.lastEvent || "Seeded");
-    await refreshStatus();
-  } catch (error) {
-    setText("webStorageSettingsEvent", "Seed failed");
-  } finally {
-    webStorageButtons.forEach((button) => {
       button.disabled = false;
     });
   }
@@ -1001,14 +1207,10 @@ async function setMp3LiveVolume(volume) {
 }
 
 function applySettings(settings) {
-  setValue("doorLockPulseMsInput", settings.doorLockPulseMs);
-  setValue("garageLockPulseMsInput", settings.garageLockPulseMs);
-  setValue("outdoorLightOnBelowLuxInput", settings.outdoorLightOnBelowLux);
-  setValue("outdoorLightOffAboveLuxInput", settings.outdoorLightOffAboveLux);
-  setValue("exhaustFanOnAboveTemperatureInput", settings.exhaustFanOnAboveTemperature);
-  setValue("exhaustFanOffBelowTemperatureInput", settings.exhaustFanOffBelowTemperature);
-  setValue("motionLight1DurationMsInput", settings.motionLight1DurationMs);
-  setValue("motionLight2DurationMsInput", settings.motionLight2DurationMs);
+  if (Array.isArray(settings.relayConfigs)) {
+    latestRelayConfigs = settings.relayConfigs;
+  }
+  renderRelaySettings(settings.relayConfigs);
   setChecked("rfidDoorUnlockEnabledInput", settings.rfidDoorUnlockEnabled);
   setValue("mp3VolumeInput", settings.mp3Volume ?? 25);
   setValue("mp3LiveVolumeInput", settings.mp3Volume ?? 25);
@@ -1020,12 +1222,23 @@ function applySettings(settings) {
   setValue("mp3SmokeAlarmThresholdRawInput", settings.mp3SmokeAlarmThresholdRaw ?? 2000);
   setChecked("tdsMonitorEnabledInput", settings.tdsMonitorEnabled);
   setValue("tdsMonitorAddressInput", settings.tdsMonitorAddress || "http://tds.local/api/tds");
+  setChecked("airPurifierEnabledInput", settings.airPurifierEnabled);
+  setValue("airPurifierAddressInput", settings.airPurifierAddress || "http://air-purifier.local/api/status");
+  setChecked("rs485EnabledInput", settings.rs485Enabled);
+  setValue("rs485BaudRateInput", settings.rs485BaudRate || 9600);
+  setText("rs485RxPinText", `GPIO${settings.rs485RxPin ?? 15}`);
+  setText("rs485TxPinText", `GPIO${settings.rs485TxPin ?? 18}`);
+  setText("rs485DirectionPinText", `GPIO${settings.rs485DirectionPin ?? 48}`);
+  setChecked("canEnabledInput", settings.canEnabled);
+  setValue("canBitrateInput", settings.canBitrate || 500000);
+  setText("canTxPinText", `GPIO${settings.canTxPin ?? 5}`);
+  setText("canRxPinText", `GPIO${settings.canRxPin ?? 6}`);
   setChecked("solaxEnabledInput", settings.solaxEnabled);
-  setValue("solaxAddressInput", settings.solaxAddress || "http://192.168.100.23/");
+  setValue("solaxAddressInput", settings.solaxAddress || "http://solax.local/");
   setValue("solaxPasswordInput", settings.solaxPassword || "");
   setValue("solaxIntervalSecondsInput", Math.round((settings.solaxIntervalMs || 10000) / 1000));
   setChecked("nitroxEnabledInput", settings.nitroxEnabled);
-  setValue("nitroxHostInput", settings.nitroxHost || "192.168.100.121");
+  setValue("nitroxHostInput", settings.nitroxHost || "nitrox.local");
   setValue("nitroxPortInput", settings.nitroxPort || 8899);
   setValue("nitroxLoggerSerialInput", settings.nitroxLoggerSerial || 1732083940);
   setValue("nitroxSlaveIdInput", settings.nitroxSlaveId || 1);
@@ -1040,7 +1253,7 @@ function applySettings(settings) {
   setValue("mdnsHostnameInput", settings.mdnsHostname || "home-automation");
   setChecked("otaEnabledInput", settings.otaEnabled);
   setChecked("loginAuthEnabledInput", settings.loginAuthEnabled);
-  setValue("loginUsernameInput", settings.loginUsername || "admin");
+  setValue("loginUsernameInput", settings.loginUsername || "user");
   setValue("loginPasswordInput", "");
   setChecked("logRfidEnabledInput", settings.logRfidEnabled);
   setChecked("logFm225EnabledInput", settings.logFm225Enabled);
@@ -1051,14 +1264,292 @@ function applySettings(settings) {
   setChecked("fm225RadarPresenceEnabledInput", settings.fm225RadarPresenceEnabled);
   setValue("fm225RadarMinDistanceCmInput", settings.fm225RadarMinDistanceCm);
   setValue("fm225RadarMinEnergyInput", settings.fm225RadarMinEnergy);
-  setValue("outdoorLightModeInput", settings.outdoorLightMode || "manual");
-  setValue("exhaustFanModeInput", settings.exhaustFanMode || "manual");
-  setValue("motionLight1ModeInput", settings.motionLight1Mode || "manual");
-  setValue("motionLight2ModeInput", settings.motionLight2Mode || "manual");
+}
+
+function relayPinLabel(config, index) {
+  return config?.mcpPin || `${index < 8 ? "GPA" : "GPB"}${index % 8}`;
+}
+
+function renderRelaySettings(configs) {
+  if (!relaySettingsGrid) {
+    return;
+  }
+
+  const relayConfigs = Array.isArray(configs) ? configs : [];
+  relaySettingsGrid.textContent = "";
+
+  for (let index = 0; index < 16; index += 1) {
+    const config = relayConfigs[index] || {};
+    const relayNumber = index + 1;
+    const card = document.createElement("article");
+    card.className = "relay-settings-card";
+
+    const title = document.createElement("div");
+    title.className = "relay-settings-title";
+
+    const heading = document.createElement("strong");
+    heading.textContent = `Relay ${relayNumber}`;
+    const pin = document.createElement("span");
+    pin.textContent = relayPinLabel(config, index);
+    title.append(heading, pin);
+
+    const nameLabel = document.createElement("label");
+    nameLabel.textContent = "Name";
+    const nameInput = document.createElement("input");
+    nameInput.name = `relay${relayNumber}Name`;
+    nameInput.type = "text";
+    nameInput.maxLength = 31;
+    nameInput.value = config.name || `Relay ${relayNumber}`;
+    nameLabel.append(nameInput);
+
+    const modeLabel = document.createElement("label");
+    modeLabel.textContent = "Mode";
+    const modeSelect = document.createElement("select");
+    modeSelect.name = `relay${relayNumber}Mode`;
+    [
+      ["manual", "Manual"],
+      ["pulse", "Pulse"],
+      ["automatic", "Automatic"]
+    ].forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      modeSelect.append(option);
+    });
+    modeSelect.value = config.mode || "manual";
+    modeLabel.append(modeSelect);
+
+    const pulseLabel = document.createElement("label");
+    pulseLabel.textContent = "Pulse Duration";
+    const pulseInput = document.createElement("input");
+    pulseInput.name = `relay${relayNumber}PulseDurationMs`;
+    pulseInput.type = "number";
+    pulseInput.min = "100";
+    pulseInput.max = "604800000";
+    pulseInput.step = "100";
+    pulseInput.value = config.pulseDurationMs ?? 1000;
+    pulseLabel.append(pulseInput);
+
+    const pulseRoleLabelElement = document.createElement("label");
+    pulseRoleLabelElement.textContent = "Pulse relay assignment";
+    const pulseRoleSelect = document.createElement("select");
+    pulseRoleSelect.name = `relay${relayNumber}PulseRole`;
+    const roleUsedByOtherRelay = (role) =>
+      relayConfigs.some((otherConfig, otherIndex) => otherIndex !== index && otherConfig?.mode === "pulse" && otherConfig?.pulseRole === role);
+    [
+      ["none", "None"],
+      ["garageDoor", "Garage Door"],
+      ["garageGate", "Garage Gate"]
+    ].forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      option.disabled = value !== "none" && config.pulseRole !== value && roleUsedByOtherRelay(value);
+      pulseRoleSelect.append(option);
+    });
+    pulseRoleSelect.value = config.pulseRole || "none";
+    pulseRoleLabelElement.append(pulseRoleSelect);
+
+    const automaticTypeLabel = document.createElement("label");
+    automaticTypeLabel.textContent = "Automatic Control Type";
+    const automaticTypeSelect = document.createElement("select");
+    automaticTypeSelect.name = `relay${relayNumber}AutomaticControlType`;
+    [["parametric", "Parametric"], ["schedule", "Schedule"]].forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      automaticTypeSelect.append(option);
+    });
+    automaticTypeSelect.value = config.automaticControlType || "parametric";
+    automaticTypeLabel.append(automaticTypeSelect);
+
+    const sensorLabelElement = document.createElement("label");
+    sensorLabelElement.textContent = "Sensor";
+    const sensorSelect = document.createElement("select");
+    sensorSelect.name = `relay${relayNumber}Sensor`;
+    [
+      ["indoorTemperature", "Inside temperature"],
+      ["outdoorTemperature", "Outside temperature DS18B20"],
+      ["humidity", "Humidity"],
+      ["lux", "Lux"],
+      ["mq135", "MQ135 gas value"],
+      ["pir", "PIR HC-SR501 motion state"]
+    ].forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      sensorSelect.append(option);
+    });
+    sensorSelect.value = config.sensor || "indoorTemperature";
+    sensorLabelElement.append(sensorSelect);
+
+    const comparisonFieldLabel = document.createElement("label");
+    comparisonFieldLabel.textContent = "Comparison condition";
+    const comparisonSelect = document.createElement("select");
+    comparisonSelect.name = `relay${relayNumber}Comparison`;
+    [
+      ["greaterThan", "Greater than"],
+      ["lessThan", "Less than"],
+      ["motionDetected", "Motion detected"],
+      ["noMotionDetected", "No motion detected"]
+    ].forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      comparisonSelect.append(option);
+    });
+    comparisonSelect.value = config.comparison || "greaterThan";
+    comparisonFieldLabel.append(comparisonSelect);
+
+    const onThresholdLabel = document.createElement("label");
+    onThresholdLabel.textContent = "ON threshold";
+    const onThresholdInput = document.createElement("input");
+    onThresholdInput.name = `relay${relayNumber}OnThreshold`;
+    onThresholdInput.type = "number";
+    onThresholdInput.step = "0.1";
+    onThresholdInput.value = config.onThreshold ?? 30;
+    onThresholdLabel.append(onThresholdInput);
+
+    const offThresholdLabel = document.createElement("label");
+    offThresholdLabel.textContent = "OFF threshold";
+    const offThresholdInput = document.createElement("input");
+    offThresholdInput.name = `relay${relayNumber}OffThreshold`;
+    offThresholdInput.type = "number";
+    offThresholdInput.step = "0.1";
+    offThresholdInput.value = config.offThreshold ?? 28;
+    offThresholdLabel.append(offThresholdInput);
+
+    const scheduleOnLabel = document.createElement("label");
+    scheduleOnLabel.textContent = "ON time";
+    const scheduleOnInput = document.createElement("input");
+    scheduleOnInput.name = `relay${relayNumber}ScheduleOnTime`;
+    scheduleOnInput.type = "time";
+    scheduleOnInput.value = minutesToTime(config.scheduleOnMinutes ?? 480);
+    scheduleOnLabel.append(scheduleOnInput);
+
+    const scheduleOffLabel = document.createElement("label");
+    scheduleOffLabel.textContent = "OFF time";
+    const scheduleOffInput = document.createElement("input");
+    scheduleOffInput.name = `relay${relayNumber}ScheduleOffTime`;
+    scheduleOffInput.type = "time";
+    scheduleOffInput.value = minutesToTime(config.scheduleOffMinutes ?? 1020);
+    scheduleOffLabel.append(scheduleOffInput);
+
+    const weekdaysLabel = document.createElement("label");
+    weekdaysLabel.textContent = "Enabled days of the week";
+    const weekdaysInput = document.createElement("input");
+    weekdaysInput.name = `relay${relayNumber}EnabledWeekdays`;
+    weekdaysInput.type = "hidden";
+    weekdaysInput.value = config.enabledWeekdays ?? 127;
+    const weekdayRow = document.createElement("div");
+    weekdayRow.className = "weekday-toggle-row";
+    ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].forEach((day, dayIndex) => {
+      const dayLabel = document.createElement("label");
+      dayLabel.className = "weekday-toggle";
+      const dayInput = document.createElement("input");
+      dayInput.type = "checkbox";
+      dayInput.name = `relay${relayNumber}Weekday${dayIndex}`;
+      dayInput.checked = ((config.enabledWeekdays ?? 127) & (1 << dayIndex)) !== 0;
+      const dayText = document.createElement("span");
+      dayText.textContent = day;
+      dayLabel.append(dayInput, dayText);
+      weekdayRow.append(dayLabel);
+    });
+    weekdaysLabel.append(weekdaysInput, weekdayRow);
+
+    const overviewLabel = document.createElement("label");
+    overviewLabel.className = "relay-dashboard-toggle";
+    const overviewInput = document.createElement("input");
+    overviewInput.name = `relay${relayNumber}ShowInDashboard`;
+    overviewInput.type = "checkbox";
+    overviewInput.checked = Boolean(config.showInDashboard);
+    const overviewText = document.createElement("span");
+    overviewText.textContent = "Show in Dashboard";
+    overviewLabel.append(overviewInput, overviewText);
+
+    const saveButton = document.createElement("button");
+    saveButton.className = "icon-action relay-save-button";
+    saveButton.type = "button";
+    saveButton.textContent = "Save";
+    saveButton.addEventListener("click", () => saveRelayCard(relayNumber));
+
+    const setFieldGroupVisible = (label, visible) => {
+      label.classList.toggle("hidden", !visible);
+      label.querySelectorAll("input, select, textarea").forEach((control) => {
+        control.disabled = !visible;
+      });
+    };
+
+    function updateVisibleFields() {
+      const mode = modeSelect.value;
+      const automaticType = automaticTypeSelect.value;
+      const isPir = sensorSelect.value === "pir";
+      if (mode !== "pulse") {
+        pulseRoleSelect.value = "none";
+      }
+      setFieldGroupVisible(pulseLabel, mode === "pulse");
+      setFieldGroupVisible(pulseRoleLabelElement, mode === "pulse");
+      setFieldGroupVisible(automaticTypeLabel, mode === "automatic");
+      setFieldGroupVisible(sensorLabelElement, mode === "automatic" && automaticType === "parametric");
+      setFieldGroupVisible(comparisonFieldLabel, mode === "automatic" && automaticType === "parametric");
+      setFieldGroupVisible(onThresholdLabel, mode === "automatic" && automaticType === "parametric" && !isPir);
+      setFieldGroupVisible(offThresholdLabel, mode === "automatic" && automaticType === "parametric" && !isPir);
+      setFieldGroupVisible(scheduleOnLabel, mode === "automatic" && automaticType === "schedule");
+      setFieldGroupVisible(scheduleOffLabel, mode === "automatic" && automaticType === "schedule");
+      setFieldGroupVisible(weekdaysLabel, mode === "automatic" && automaticType === "schedule");
+    }
+
+    modeSelect.addEventListener("change", updateVisibleFields);
+    modeSelect.addEventListener("change", updatePulseRoleOptions);
+    pulseRoleSelect.addEventListener("change", updatePulseRoleOptions);
+    automaticTypeSelect.addEventListener("change", updateVisibleFields);
+    sensorSelect.addEventListener("change", updateVisibleFields);
+
+    card.append(
+      title,
+      nameLabel,
+      modeLabel,
+      pulseLabel,
+      pulseRoleLabelElement,
+      automaticTypeLabel,
+      sensorLabelElement,
+      comparisonFieldLabel,
+      onThresholdLabel,
+      offThresholdLabel,
+      scheduleOnLabel,
+      scheduleOffLabel,
+      weekdaysLabel,
+      overviewLabel,
+      saveButton
+    );
+    updateVisibleFields();
+    relaySettingsGrid.append(card);
+  }
+  updatePulseRoleOptions();
+}
+
+async function saveRelayCard(relayNumber) {
+  settingsMessage.textContent = "Saving relay...";
+  try {
+    const response = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formToPayload(settingsForm),
+      cache: "no-store"
+    });
+    if (!response.ok) {
+      throw new Error(`Save failed: ${response.status}`);
+    }
+    applySettings(await response.json());
+    settingsMessage.textContent = `Relay ${relayNumber} saved`;
+    await refreshStatus();
+  } catch (error) {
+    settingsMessage.textContent = `Relay ${relayNumber} save failed`;
+  }
 }
 
 async function loadSettings() {
-  const response = await fetch("/api/settings", { cache: "no-store" });
+  const response = await fetchWithTimeout("/api/settings", { cache: "no-store" }, 1800);
   if (!response.ok) {
     throw new Error(`Settings API failed: ${response.status}`);
   }
@@ -1067,14 +1558,6 @@ async function loadSettings() {
 
 function formToPayload(form) {
   const payload = new URLSearchParams();
-  payload.set("doorLockPulseMs", form.doorLockPulseMs.value);
-  payload.set("garageLockPulseMs", form.garageLockPulseMs.value);
-  payload.set("outdoorLightOnBelowLux", form.outdoorLightOnBelowLux.value);
-  payload.set("outdoorLightOffAboveLux", form.outdoorLightOffAboveLux.value);
-  payload.set("exhaustFanOnAboveTemperature", form.exhaustFanOnAboveTemperature.value);
-  payload.set("exhaustFanOffBelowTemperature", form.exhaustFanOffBelowTemperature.value);
-  payload.set("motionLight1DurationMs", form.motionLight1DurationMs.value);
-  payload.set("motionLight2DurationMs", form.motionLight2DurationMs.value);
   payload.set("rfidDoorUnlockEnabled", form.rfidDoorUnlockEnabled.checked ? "true" : "false");
   payload.set("mp3Volume", form.mp3Volume.value);
   payload.set("mp3StartupSoundEnabled", form.mp3StartupSoundEnabled.checked ? "true" : "false");
@@ -1084,6 +1567,12 @@ function formToPayload(form) {
   payload.set("mp3SmokeAlarmThresholdRaw", form.mp3SmokeAlarmThresholdRaw.value);
   payload.set("tdsMonitorEnabled", form.tdsMonitorEnabled.checked ? "true" : "false");
   payload.set("tdsMonitorAddress", form.tdsMonitorAddress.value);
+  payload.set("airPurifierEnabled", form.airPurifierEnabled.checked ? "true" : "false");
+  payload.set("airPurifierAddress", form.airPurifierAddress.value);
+  payload.set("rs485Enabled", form.rs485Enabled.checked ? "true" : "false");
+  payload.set("rs485BaudRate", form.rs485BaudRate.value);
+  payload.set("canEnabled", form.canEnabled.checked ? "true" : "false");
+  payload.set("canBitrate", form.canBitrate.value);
   payload.set("solaxEnabled", form.solaxEnabled.checked ? "true" : "false");
   payload.set("solaxAddress", form.solaxAddress.value);
   payload.set("solaxPassword", form.solaxPassword.value);
@@ -1115,10 +1604,36 @@ function formToPayload(form) {
   payload.set("fm225RadarPresenceEnabled", form.fm225RadarPresenceEnabled.checked ? "true" : "false");
   payload.set("fm225RadarMinDistanceCm", form.fm225RadarMinDistanceCm.value);
   payload.set("fm225RadarMinEnergy", form.fm225RadarMinEnergy.value);
-  payload.set("outdoorLightMode", form.outdoorLightMode.value);
-  payload.set("exhaustFanMode", form.exhaustFanMode.value);
-  payload.set("motionLight1Mode", form.motionLight1Mode.value);
-  payload.set("motionLight2Mode", form.motionLight2Mode.value);
+  for (let index = 1; index <= 16; index += 1) {
+    const config = latestRelayConfigs[index - 1] || {};
+    payload.set(`relay${index}Name`, form[`relay${index}Name`]?.value || `Relay ${index}`);
+    payload.set(`relay${index}Mode`, form[`relay${index}Mode`]?.value || "manual");
+    payload.set(`relay${index}PulseDurationMs`, form[`relay${index}PulseDurationMs`]?.value || String(config.pulseDurationMs || 1000));
+    payload.set(`relay${index}PulseRole`, form[`relay${index}PulseRole`]?.value || config.pulseRole || "none");
+    payload.set(`relay${index}ShowInDashboard`, form[`relay${index}ShowInDashboard`]?.checked ? "true" : "false");
+    payload.set(`relay${index}CurrentState`, config.currentState ? "true" : "false");
+    payload.set(`relay${index}AutomaticControlType`, form[`relay${index}AutomaticControlType`]?.value || config.automaticControlType || "parametric");
+    payload.set(`relay${index}Sensor`, form[`relay${index}Sensor`]?.value || config.sensor || "indoorTemperature");
+    payload.set(`relay${index}Comparison`, form[`relay${index}Comparison`]?.value || config.comparison || "greaterThan");
+    payload.set(`relay${index}OnThreshold`, form[`relay${index}OnThreshold`]?.value || String(config.onThreshold ?? 30));
+    payload.set(`relay${index}OffThreshold`, form[`relay${index}OffThreshold`]?.value || String(config.offThreshold ?? 28));
+    payload.set(
+      `relay${index}ScheduleOnMinutes`,
+      form[`relay${index}ScheduleOnTime`] ? String(timeToMinutes(form[`relay${index}ScheduleOnTime`].value)) : String(config.scheduleOnMinutes ?? 480)
+    );
+    payload.set(
+      `relay${index}ScheduleOffMinutes`,
+      form[`relay${index}ScheduleOffTime`] ? String(timeToMinutes(form[`relay${index}ScheduleOffTime`].value)) : String(config.scheduleOffMinutes ?? 1020)
+    );
+    const weekdayControls = Array.from({ length: 7 }, (_, day) => form[`relay${index}Weekday${day}`]).filter(Boolean);
+    let weekdayMask = weekdayControls.length > 0 ? 0 : Number(config.enabledWeekdays ?? 127);
+    for (let day = 0; day < 7; day += 1) {
+      if (form[`relay${index}Weekday${day}`]?.checked) {
+        weekdayMask |= 1 << day;
+      }
+    }
+    payload.set(`relay${index}EnabledWeekdays`, String(weekdayMask));
+  }
   return payload;
 }
 
@@ -1158,7 +1673,7 @@ async function loadEventLogs() {
     list.textContent = "Loading logs...";
   }
 
-  const response = await fetch("/api/logs", { cache: "no-store" });
+  const response = await fetchWithTimeout("/api/logs", { cache: "no-store" }, 1800);
   if (!response.ok) {
     throw new Error(`Logs API failed: ${response.status}`);
   }
@@ -1240,8 +1755,9 @@ settingsForm.addEventListener("submit", async (event) => {
       throw new Error(`Save failed: ${response.status}`);
     }
 
-    applySettings(await response.json());
-    settingsMessage.textContent = "Saved";
+    const savedSettings = await response.json();
+    applySettings(savedSettings);
+    settingsMessage.textContent = savedSettings.inverterSettingsSaved === false ? "Saved, inverter storage failed" : "Saved";
     await refreshStatus();
   } catch (error) {
     settingsMessage.textContent = "Save failed";
@@ -1261,6 +1777,55 @@ if (mp3LiveVolumeInput) {
   });
 }
 
+if (rs485TestSendButton) {
+  rs485TestSendButton.addEventListener("click", async () => {
+    rs485TestSendButton.disabled = true;
+    settingsMessage.textContent = "Sending RS485 test...";
+    try {
+      const payload = new URLSearchParams();
+      payload.set("text", document.querySelector("#rs485TestTextInput")?.value || "RS485 demo");
+      const response = await fetch("/api/rs485/test-send", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: payload,
+        cache: "no-store"
+      });
+      settingsMessage.textContent = response.ok ? "RS485 test sent" : "RS485 test failed";
+      await refreshStatus();
+    } catch (error) {
+      settingsMessage.textContent = "RS485 test failed";
+    } finally {
+      rs485TestSendButton.disabled = false;
+    }
+  });
+}
+
+if (canTestSendButton) {
+  canTestSendButton.addEventListener("click", async () => {
+    canTestSendButton.disabled = true;
+    settingsMessage.textContent = "Sending CAN test...";
+    try {
+      const payload = new URLSearchParams();
+      payload.set("id", document.querySelector("#canTestIdInput")?.value || "291");
+      payload.set("length", document.querySelector("#canTestLengthInput")?.value || "0");
+      payload.set("byte0", document.querySelector("#canTestByte0Input")?.value || "0");
+      payload.set("byte1", document.querySelector("#canTestByte1Input")?.value || "0");
+      const response = await fetch("/api/can/test-send", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: payload,
+        cache: "no-store"
+      });
+      settingsMessage.textContent = response.ok ? "CAN test sent" : "CAN test failed";
+      await refreshStatus();
+    } catch (error) {
+      settingsMessage.textContent = "CAN test failed";
+    } finally {
+      canTestSendButton.disabled = false;
+    }
+  });
+}
+
 fm225Buttons.forEach((button) => {
   button.addEventListener("click", () => {
     runFm225Action(button.dataset.action);
@@ -1270,36 +1835,6 @@ fm225Buttons.forEach((button) => {
 rfidButtons.forEach((button) => {
   button.addEventListener("click", () => {
     runRfidAction(button.dataset.action);
-  });
-});
-
-webStorageButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    runWebStorageAction(button.dataset.action);
-  });
-});
-
-lockCards.forEach((card) => {
-  card.addEventListener("click", () => {
-    postLockPulse(card);
-  });
-});
-
-automationModeButtons.forEach((button) => {
-  button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    const payload = automationPayload(button.dataset.device);
-    payload.set("mode", button.dataset.mode);
-    postAutomation("mode", payload);
-  });
-});
-
-manualRelayCards.forEach((card) => {
-  card.addEventListener("click", (event) => {
-    if (event.target.closest(".mode-toggle") || card.classList.contains("busy") || card.dataset.mode !== "manual") {
-      return;
-    }
-    postAutomation("toggle", automationPayload(card.dataset.device));
   });
 });
 

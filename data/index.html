@@ -43,9 +43,12 @@
               <span id="uptime">--</span>
             </div>
           </div>
-          <div class="status-pill" id="connectionStatus">
-            <span class="dot"></span>
-            <span id="connectionLabel">Connecting</span>
+          <div class="status-pill temperature-pill" id="esp32TemperatureChip" title="ESP32 internal temperature">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M14 4a2 2 0 0 0-4 0v8.3a4.5 4.5 0 1 0 4 0V4Z"></path>
+              <path d="M12 15v3"></path>
+            </svg>
+            <span id="esp32HeaderTemperature">--.- C</span>
           </div>
         </div>
       </header>
@@ -118,23 +121,9 @@
               </div>
             </article>
 
-            <article class="metric-card relay-card lock-card" data-lock-endpoint="door/pulse" id="doorLockCard">
-              <div class="card-meta">
-                <span>Door Lock</span>
-                <strong id="doorLockState">OFF</strong>
-              </div>
-              <p class="door-status" id="doorReedStatus">Door --</p>
-            </article>
+            <div class="relay-dashboard-grid" id="priorityRelayDashboardGrid"></div>
 
-            <article class="metric-card relay-card lock-card" data-lock-endpoint="garage/pulse" id="garageLockCard">
-              <div class="card-meta">
-                <span>Garage Door Lock</span>
-                <strong id="garageLockState">OFF</strong>
-              </div>
-              <p class="door-status" id="garageReedStatus">Door --</p>
-            </article>
-
-            <article class="metric-card inverter-card" id="nitroxInverterCard">
+            <article class="metric-card inverter-card hidden" id="nitroxInverterCard">
               <div class="inverter-title">
                 <strong>Nitrox</strong>
                 <span id="nitroxInverterStatus">Waiting</span>
@@ -225,7 +214,7 @@
               </div>
             </article>
 
-            <article class="metric-card inverter-card" id="solaxInverterCard">
+            <article class="metric-card inverter-card hidden" id="solaxInverterCard">
               <div class="inverter-title">
                 <strong>Solax</strong>
                 <span id="solaxInverterStatus">Waiting</span>
@@ -316,7 +305,7 @@
               </div>
             </article>
 
-            <article class="metric-card inverter-card growatt-card" id="growattInverterCard">
+            <article class="metric-card inverter-card growatt-card hidden" id="growattInverterCard">
               <div class="inverter-title">
                 <strong>Growatt</strong>
                 <span id="growattInverterStatus">Waiting</span>
@@ -350,74 +339,6 @@
               </div>
             </article>
 
-            <article class="metric-card relay-card manual-relay-card" data-device="outdoorLight" id="outdoorLightCard">
-              <div class="card-meta">
-                <span>Outdoor Light</span>
-                <strong id="outdoorLightState">OFF</strong>
-              </div>
-              <p id="outdoorLightStatus">Manual mode</p>
-              <div class="relay-controls mode-toggle" role="group" aria-label="Outdoor Light mode">
-                <button class="automation-mode-option" data-device="outdoorLight" data-mode="manual" type="button" aria-pressed="true">Manual</button>
-                <button class="automation-mode-option" data-device="outdoorLight" data-mode="automatic" type="button" aria-pressed="false">Automatic</button>
-              </div>
-            </article>
-
-            <article class="metric-card relay-card manual-relay-card" data-device="exhaustFan" id="exhaustFanCard">
-              <div class="card-meta">
-                <span>Exhaust Fan</span>
-                <strong id="exhaustFanState">OFF</strong>
-              </div>
-              <p id="exhaustFanStatus">Manual mode</p>
-              <div class="relay-controls mode-toggle" role="group" aria-label="Exhaust Fan mode">
-                <button class="automation-mode-option" data-device="exhaustFan" data-mode="manual" type="button" aria-pressed="true">Manual</button>
-                <button class="automation-mode-option" data-device="exhaustFan" data-mode="automatic" type="button" aria-pressed="false">Automatic</button>
-              </div>
-            </article>
-
-            <article class="metric-card relay-card manual-relay-card" data-device="motionLight1" id="motionLight1Card">
-              <div class="card-meta">
-                <span>Motion Light 1</span>
-                <strong id="motionLight1State">OFF</strong>
-              </div>
-              <p id="motionLight1Status">Manual mode</p>
-              <div class="relay-controls mode-toggle" role="group" aria-label="Motion Light 1 mode">
-                <button class="automation-mode-option" data-device="motionLight1" data-mode="manual" type="button" aria-pressed="true">Manual</button>
-                <button class="automation-mode-option" data-device="motionLight1" data-mode="automatic" type="button" aria-pressed="false">Automatic</button>
-              </div>
-            </article>
-
-            <article class="metric-card relay-card manual-relay-card" data-device="motionLight2" id="motionLight2Card">
-              <div class="card-meta">
-                <span>Motion Light 2</span>
-                <strong id="motionLight2State">OFF</strong>
-              </div>
-              <p id="motionLight2Status">Manual mode</p>
-              <div class="relay-controls mode-toggle" role="group" aria-label="Motion Light 2 mode">
-                <button class="automation-mode-option" data-device="motionLight2" data-mode="manual" type="button" aria-pressed="true">Manual</button>
-                <button class="automation-mode-option" data-device="motionLight2" data-mode="automatic" type="button" aria-pressed="false">Automatic</button>
-              </div>
-            </article>
-
-            <article class="metric-card inverter-card smoke-card" id="mq135Card">
-              <div class="inverter-title">
-                <strong>Smoke Monitor</strong>
-                <span id="mq135Status">Waiting</span>
-              </div>
-              <div class="smoke-visuals">
-                <div class="smoke-icon-node" aria-hidden="true">
-                  <svg class="smoke-icon" viewBox="0 0 24 24">
-                    <path d="M8.6 20.5c-1.9-.9-3.1-2.4-3.1-4.2 0-2.2 1.8-3.4 3.2-4.5 1.1-.9 2-1.6 2-2.8 0-1-.5-1.9-1.4-2.7 3.4.7 5.9 3.4 5.9 6.4 0 1.3-.5 2.4-1.2 3.4"></path>
-                    <path d="M14 20.5c2.4-.8 4-2.5 4-4.6 0-1.4-.7-2.6-1.8-3.7"></path>
-                    <path d="M9 17.2c1.8-.6 3.2-.6 5 0"></path>
-                  </svg>
-                </div>
-                <div class="smoke-reading">
-                  <strong id="mq135State">--</strong>
-                  <span id="mq135Reading">MQ-135 waiting for data</span>
-                </div>
-              </div>
-            </article>
-
             <article class="metric-card inverter-card tds-monitor-card hidden" id="tdsMonitorCard">
               <div class="inverter-title">
                 <strong>TDS Monitor</strong>
@@ -446,16 +367,76 @@
               </div>
             </article>
 
+            <article class="metric-card inverter-card air-purifier-card hidden" id="airPurifierCard">
+              <div class="inverter-title">
+                <strong>Air Purifier</strong>
+                <span id="airPurifierStatus">Disabled</span>
+              </div>
+              <div class="air-purifier-visuals">
+                <div class="air-quality-orb" id="airPurifierGauge" role="meter" aria-label="PM2.5 value" aria-valuemin="0" aria-valuemax="500">
+                  <svg class="tds-metric-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 9c2.4-2 5.2-2 8.2 0s5.6 2 7.8 0"></path>
+                    <path d="M4 14c2.4-2 5.2-2 8.2 0s5.6 2 7.8 0"></path>
+                    <path d="M7 19c1.5-1.1 3-1.1 4.6 0s3.1 1.1 4.4 0"></path>
+                  </svg>
+                  <strong id="airPurifierPm25">--</strong>
+                  <span>PM2.5</span>
+                </div>
+                <div class="air-purifier-readings">
+                  <div>
+                    <span>PM1</span>
+                    <strong id="airPurifierPm1">--</strong>
+                  </div>
+                  <div>
+                    <span>PM10</span>
+                    <strong id="airPurifierPm10">--</strong>
+                  </div>
+                  <div>
+                    <span>Fan</span>
+                    <strong id="airPurifierFan">--</strong>
+                  </div>
+                  <div>
+                    <span>Purifier</span>
+                    <strong id="airPurifierPower">--</strong>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <article class="metric-card inverter-card smoke-card" id="mq135Card">
+              <div class="inverter-title">
+                <strong>Smoke Monitor</strong>
+                <span id="mq135Status">Waiting</span>
+              </div>
+              <div class="smoke-visuals">
+                <div class="smoke-icon-node" aria-hidden="true">
+                  <svg class="smoke-icon" viewBox="0 0 24 24">
+                    <path d="M8.6 20.5c-1.9-.9-3.1-2.4-3.1-4.2 0-2.2 1.8-3.4 3.2-4.5 1.1-.9 2-1.6 2-2.8 0-1-.5-1.9-1.4-2.7 3.4.7 5.9 3.4 5.9 6.4 0 1.3-.5 2.4-1.2 3.4"></path>
+                    <path d="M14 20.5c2.4-.8 4-2.5 4-4.6 0-1.4-.7-2.6-1.8-3.7"></path>
+                    <path d="M9 17.2c1.8-.6 3.2-.6 5 0"></path>
+                  </svg>
+                </div>
+                <div class="smoke-reading">
+                  <strong id="mq135State">--</strong>
+                  <span id="mq135Reading">MQ-135 waiting for data</span>
+                </div>
+              </div>
+            </article>
+
+            <div class="relay-dashboard-grid" id="relayDashboardGrid"></div>
+
           </div>
         </section>
 
         <section class="tab-panel" id="settingsPanel">
-          <form class="settings-card" id="settingsForm">
+          <form class="settings-card" id="settingsForm" novalidate>
             <div class="settings-subtabs" aria-label="Settings sections">
               <button class="settings-subtab active" data-settings-tab="about" type="button">About</button>
               <button class="settings-subtab" data-settings-tab="access" type="button">Access</button>
               <button class="settings-subtab" data-settings-tab="sound" type="button">Sound</button>
               <button class="settings-subtab" data-settings-tab="tds" type="button">TDS</button>
+              <button class="settings-subtab" data-settings-tab="airPurifier" type="button">Air Purifier</button>
+              <button class="settings-subtab" data-settings-tab="communication" type="button">Communication</button>
               <button class="settings-subtab" data-settings-tab="inverters" type="button">Inverters</button>
               <button class="settings-subtab" data-settings-tab="relays" type="button">Relays</button>
               <button class="settings-subtab" data-settings-tab="network" type="button">Network</button>
@@ -481,10 +462,60 @@
 
             <div class="settings-section compact-storage-heading">
               <div>
+                <p class="eyebrow">ESP32-S3 Controller</p>
+                <h2>Controller Status</h2>
+              </div>
+            </div>
+
+            <div class="esp32-status-card">
+              <div class="esp32-status-main">
+                <div class="esp32-temp-ring">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M14 4a2 2 0 0 0-4 0v8.3a4.5 4.5 0 1 0 4 0V4Z"></path>
+                    <path d="M12 15v3"></path>
+                  </svg>
+                  <strong id="esp32AboutTemperature">--.- C</strong>
+                  <span>Internal Temperature</span>
+                </div>
+                <div>
+                  <p class="eyebrow">Firmware</p>
+                  <h3 id="esp32Firmware">--</h3>
+                  <span id="esp32NetworkSummary">Waiting for controller status</span>
+                </div>
+              </div>
+              <div class="health-grid settings-status-grid esp32-status-grid">
+                <div>
+                  <span>WiFi</span>
+                  <strong id="esp32WifiStatus">--</strong>
+                </div>
+                <div>
+                  <span>IP Address</span>
+                  <strong id="esp32IpAddress">--</strong>
+                </div>
+                <div>
+                  <span>Signal</span>
+                  <strong id="esp32Rssi">--</strong>
+                </div>
+                <div>
+                  <span>Free Heap</span>
+                  <strong id="esp32FreeHeap">--</strong>
+                </div>
+                <div>
+                  <span>Uptime</span>
+                  <strong id="esp32Uptime">--</strong>
+                </div>
+                <div>
+                  <span>Storage</span>
+                  <strong id="esp32StorageStatus">--</strong>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section compact-storage-heading">
+              <div>
                 <p class="eyebrow">Winbond IC Storage</p>
                 <h2>Storage Status</h2>
               </div>
-              <button class="primary-action web-storage-action compact-seed-action" data-action="seed" id="webStorageSeedButton" type="button">Seed Files</button>
             </div>
 
             <div class="health-grid settings-status-grid">
@@ -679,6 +710,116 @@
             </label>
             </section>
 
+            <section class="settings-subpanel" data-settings-panel="airPurifier">
+            <div class="settings-section settings-heading">
+              <div>
+                <p class="eyebrow">Air Purifier Monitor</p>
+                <h2>Air Purifier</h2>
+              </div>
+            </div>
+
+            <label class="toggle-row">
+              <span>
+                Enable Air Purifier Monitor
+                <small>Poll the air purifier and show PM values on the dashboard.</small>
+              </span>
+              <input id="airPurifierEnabledInput" name="airPurifierEnabled" type="checkbox">
+            </label>
+
+            <label>
+              Air Purifier Address
+              <input id="airPurifierAddressInput" name="airPurifierAddress" type="text" value="http://air-purifier.local/api/status" autocomplete="off">
+            </label>
+            </section>
+
+            <section class="settings-subpanel" data-settings-panel="communication">
+            <div class="settings-section settings-heading">
+              <div>
+                <p class="eyebrow">RS485 and CAN</p>
+                <h2>Communication</h2>
+              </div>
+            </div>
+
+            <div class="control-grid settings-grid">
+              <label class="settings-switch">
+                <span>Enable RS485</span>
+                <input id="rs485EnabledInput" name="rs485Enabled" type="checkbox">
+              </label>
+              <label>
+                RS485 Baud Rate
+                <select id="rs485BaudRateInput" name="rs485BaudRate">
+                  <option value="9600">9600</option>
+                  <option value="19200">19200</option>
+                  <option value="38400">38400</option>
+                  <option value="57600">57600</option>
+                  <option value="115200">115200</option>
+                </select>
+              </label>
+              <label>
+                RS485 Test Send
+                <input id="rs485TestTextInput" type="text" value="RS485 demo" autocomplete="off">
+              </label>
+            </div>
+            <div class="health-grid settings-status-grid">
+              <div><span>Status</span><strong id="rs485StatusText">--</strong></div>
+              <div><span>RX / RO</span><strong id="rs485RxPinText">GPIO15</strong></div>
+              <div><span>TX / DI</span><strong id="rs485TxPinText">GPIO18</strong></div>
+              <div><span>RE# + DE</span><strong id="rs485DirectionPinText">GPIO48</strong></div>
+              <div><span>Connector</span><strong>1 A, 2 B, 3 GND</strong></div>
+              <div><span>Direction</span><strong>LOW receive, HIGH transmit</strong></div>
+            </div>
+            <div class="button-row">
+              <button class="icon-action" id="rs485TestSendButton" type="button">Send RS485 Test</button>
+            </div>
+
+            <div class="settings-section settings-heading">
+              <div>
+                <p class="eyebrow">ESP32 TWAI</p>
+                <h2>CAN</h2>
+              </div>
+            </div>
+            <div class="control-grid settings-grid">
+              <label class="settings-switch">
+                <span>Enable CAN</span>
+                <input id="canEnabledInput" name="canEnabled" type="checkbox">
+              </label>
+              <label>
+                CAN Bitrate
+                <select id="canBitrateInput" name="canBitrate">
+                  <option value="125000">125 kbit/s</option>
+                  <option value="250000">250 kbit/s</option>
+                  <option value="500000">500 kbit/s</option>
+                  <option value="1000000">1 Mbit/s</option>
+                </select>
+              </label>
+              <label>
+                Test Frame ID
+                <input id="canTestIdInput" type="number" min="0" max="2047" step="1" value="291">
+              </label>
+              <label>
+                Test Length
+                <input id="canTestLengthInput" type="number" min="0" max="8" step="1" value="2">
+              </label>
+              <label>
+                Byte 0
+                <input id="canTestByte0Input" type="number" min="0" max="255" step="1" value="17">
+              </label>
+              <label>
+                Byte 1
+                <input id="canTestByte1Input" type="number" min="0" max="255" step="1" value="34">
+              </label>
+            </div>
+            <div class="health-grid settings-status-grid">
+              <div><span>Status</span><strong id="canStatusText">--</strong></div>
+              <div><span>CAN TX</span><strong id="canTxPinText">GPIO5</strong></div>
+              <div><span>CAN RX</span><strong id="canRxPinText">GPIO6</strong></div>
+              <div><span>Connector</span><strong>1 CANH, 2 CANL, 3 GND</strong></div>
+            </div>
+            <div class="button-row">
+              <button class="icon-action" id="canTestSendButton" type="button">Send CAN Test</button>
+            </div>
+            </section>
+
             <section class="settings-subpanel" data-settings-panel="inverters">
             <div class="settings-section settings-heading">
               <div>
@@ -698,7 +839,7 @@
             <div class="control-grid settings-grid">
               <label>
                 SolaX Address
-                <input id="solaxAddressInput" name="solaxAddress" type="text" value="http://192.168.100.23/" autocomplete="off">
+                <input id="solaxAddressInput" name="solaxAddress" type="text" value="http://solax.local/" autocomplete="off">
               </label>
               <label>
                 SolaX Password
@@ -721,7 +862,7 @@
             <div class="control-grid settings-grid">
               <label>
                 Nitrox Host / IP
-                <input id="nitroxHostInput" name="nitroxHost" type="text" value="192.168.100.121" autocomplete="off">
+                <input id="nitroxHostInput" name="nitroxHost" type="text" value="nitrox.local" autocomplete="off">
               </label>
               <label>
                 Nitrox Port
@@ -777,78 +918,15 @@
               </div>
             </div>
 
-            <label>
-              Small Door Lock Pulse Duration
-              <input id="doorLockPulseMsInput" name="doorLockPulseMs" type="number" min="100" max="30000" step="100">
-            </label>
-
-            <label>
-              Garage Door Lock Pulse Duration
-              <input id="garageLockPulseMsInput" name="garageLockPulseMs" type="number" min="100" max="30000" step="100">
-            </label>
-
-            <div class="control-grid settings-grid">
-              <label>
-                Outdoor Light Mode
-                <select id="outdoorLightModeInput" name="outdoorLightMode">
-                  <option value="manual">Manual</option>
-                  <option value="automatic">Automatic</option>
-                </select>
-              </label>
-              <label>
-                Outdoor Light ON Below Lux
-                <input id="outdoorLightOnBelowLuxInput" name="outdoorLightOnBelowLux" type="number" min="0" max="100000" step="1">
-              </label>
-              <label>
-                Outdoor Light OFF Above Lux
-                <input id="outdoorLightOffAboveLuxInput" name="outdoorLightOffAboveLux" type="number" min="0" max="100000" step="1">
-              </label>
-            </div>
-
-            <div class="control-grid settings-grid">
-              <label>
-                Exhaust Fan Mode
-                <select id="exhaustFanModeInput" name="exhaustFanMode">
-                  <option value="manual">Manual</option>
-                  <option value="automatic">Automatic</option>
-                </select>
-              </label>
-              <label>
-                Exhaust Fan ON Above Temperature
-                <input id="exhaustFanOnAboveTemperatureInput" name="exhaustFanOnAboveTemperature" type="number" min="-40" max="100" step="0.5">
-              </label>
-              <label>
-                Exhaust Fan OFF Below Temperature
-                <input id="exhaustFanOffBelowTemperatureInput" name="exhaustFanOffBelowTemperature" type="number" min="-40" max="100" step="0.5">
-              </label>
-            </div>
-
-            <div class="control-grid settings-grid">
-              <label>
-                Motion Light 1 Mode
-                <select id="motionLight1ModeInput" name="motionLight1Mode">
-                  <option value="manual">Manual</option>
-                  <option value="automatic">Automatic</option>
-                </select>
-              </label>
-              <label>
-                PIR Motion Light 1 Duration
-                <input id="motionLight1DurationMsInput" name="motionLight1DurationMs" type="number" min="1000" max="3600000" step="1000">
-              </label>
-            </div>
-
-            <div class="control-grid settings-grid">
-              <label>
-                Motion Light 2 Mode
-                <select id="motionLight2ModeInput" name="motionLight2Mode">
-                  <option value="manual">Manual</option>
-                  <option value="automatic">Automatic</option>
-                </select>
-              </label>
-              <label>
-                PIR Motion Light 2 Duration
-                <input id="motionLight2DurationMsInput" name="motionLight2DurationMs" type="number" min="1000" max="3600000" step="1000">
-              </label>
+            <div class="settings-section">
+              <div class="settings-heading">
+                <div>
+                  <p class="eyebrow">MCP23017 Relay Configuration</p>
+                  <h3>16 Relay Channels</h3>
+                </div>
+              </div>
+              <div class="relay-settings-grid" id="relaySettingsGrid"></div>
+              <p class="settings-note">Channels 1-8 use GPA0-GPA7 and channels 9-16 use GPB0-GPB7.</p>
             </div>
             </section>
 

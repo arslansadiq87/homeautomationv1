@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <HTTPClient.h>
-#include <LittleFS.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -10,6 +9,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "CANBusManager.h"
+#include "RS485Manager.h"
 #include "fm225.h"
 #include "mp3.h"
 #include "modules.h"
@@ -19,6 +20,7 @@
 #include "relay_automation.h"
 #include "secrets.h"
 #include "web.h"
+#include "web_assets_generated.h"
 
 namespace {
 WebServer server(80);
@@ -40,8 +42,14 @@ constexpr uint32_t TDS_SETTINGS_MAGIC = 0x54445331;
 constexpr uint16_t TDS_SETTINGS_VERSION = 1;
 constexpr uint32_t TDS_SETTINGS_ADDRESS = W25Q128_EXPECTED_BYTES - 16384UL;
 constexpr uint32_t TDS_POLL_INTERVAL_MS = 5000;
-constexpr uint32_t TDS_HTTP_TIMEOUT_MS = 350;
+constexpr uint32_t TDS_HTTP_TIMEOUT_MS = 150;
 constexpr size_t TDS_ADDRESS_SIZE = 96;
+constexpr uint32_t AIR_PURIFIER_SETTINGS_MAGIC = 0x41505231;
+constexpr uint16_t AIR_PURIFIER_SETTINGS_VERSION = 1;
+constexpr uint32_t AIR_PURIFIER_SETTINGS_ADDRESS = W25Q128_EXPECTED_BYTES - 73728UL;
+constexpr uint32_t AIR_PURIFIER_POLL_INTERVAL_MS = 5000;
+constexpr uint32_t AIR_PURIFIER_HTTP_TIMEOUT_MS = 150;
+constexpr size_t AIR_PURIFIER_ADDRESS_SIZE = 96;
 constexpr uint32_t INVERTER_SETTINGS_MAGIC = 0x494E5631;
 constexpr uint16_t INVERTER_SETTINGS_VERSION = 1;
 constexpr uint32_t INVERTER_SETTINGS_ADDRESS = W25Q128_EXPECTED_BYTES - 20480UL;
@@ -67,6 +75,9 @@ constexpr uint32_t EVENT_LOG_MAGIC = 0x45564C31;
 constexpr uint16_t EVENT_LOG_VERSION = 1;
 constexpr uint32_t EVENT_LOG_ADDRESS = W25Q128_EXPECTED_BYTES - 69632UL;
 constexpr uint32_t EVENT_LOG_BYTES = 32768UL;
+constexpr uint32_t COMMUNICATION_SETTINGS_MAGIC = 0x434F4D31;
+constexpr uint16_t COMMUNICATION_SETTINGS_VERSION = 1;
+constexpr uint32_t COMMUNICATION_SETTINGS_ADDRESS = W25Q128_EXPECTED_BYTES - 77824UL;
 constexpr uint16_t EVENT_LOG_MAX_RECORDS = 240;
 constexpr uint32_t LOG_RETENTION_SECONDS = 30UL * 24UL * 60UL * 60UL;
 constexpr size_t WIFI_SSID_SIZE = 33;
@@ -80,12 +91,13 @@ constexpr uint8_t MP3_SOUND_MIN_TRACK = 1;
 constexpr uint8_t MP3_SOUND_MAX_TRACK = 255;
 constexpr uint8_t MP3_SOUND_MAX_VOLUME = 30;
 constexpr uint16_t MQ135_ALARM_MAX_RAW = 4095;
-constexpr uint32_t SOLAX_HTTP_TIMEOUT_MS = 350;
-constexpr uint32_t NITROX_TCP_TIMEOUT_MS = 350;
-constexpr uint32_t GROWATT_HTTP_TIMEOUT_MS = 500;
+constexpr uint32_t SOLAX_HTTP_TIMEOUT_MS = 150;
+constexpr uint32_t NITROX_TCP_TIMEOUT_MS = 150;
+constexpr uint32_t GROWATT_HTTP_TIMEOUT_MS = 250;
 constexpr uint32_t API_FAILURE_BACKOFF_MS = 60000;
 constexpr uint32_t WIFI_CONNECT_WINDOW_MS = 15000;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 30000;
+constexpr uint32_t RELAY_COMMAND_PRIORITY_WINDOW_MS = 2500;
 
 const char *WEB_STORAGE_PATHS[WEB_STORAGE_FILE_COUNT] = {
   "/index.html",
@@ -146,6 +158,36 @@ struct StoredTdsMonitorSettings {
   uint16_t version = TDS_SETTINGS_VERSION;
   uint16_t size = 0;
   TdsMonitorSettings settings;
+  uint32_t crc = 0;
+};
+
+struct AirPurifierSettings {
+  bool enabled = false;
+  char address[AIR_PURIFIER_ADDRESS_SIZE] = "http://air-purifier.local/api/status";
+};
+
+struct CommunicationSettings {
+  bool rs485Enabled = false;
+  uint8_t reserved0[3] = {};
+  uint32_t rs485BaudRate = 9600;
+  bool canEnabled = false;
+  uint8_t reserved1[3] = {};
+  uint32_t canBitrate = 500000;
+};
+
+struct StoredCommunicationSettings {
+  uint32_t magic = COMMUNICATION_SETTINGS_MAGIC;
+  uint16_t version = COMMUNICATION_SETTINGS_VERSION;
+  uint16_t size = 0;
+  CommunicationSettings settings;
+  uint32_t crc = 0;
+};
+
+struct StoredAirPurifierSettings {
+  uint32_t magic = AIR_PURIFIER_SETTINGS_MAGIC;
+  uint16_t version = AIR_PURIFIER_SETTINGS_VERSION;
+  uint16_t size = 0;
+  AirPurifierSettings settings;
   uint32_t crc = 0;
 };
 
@@ -226,8 +268,8 @@ struct StoredLegacyNetworkSettings {
 
 struct SecuritySettings {
   bool loginEnabled = false;
-  char username[SECURITY_USERNAME_SIZE] = "admin";
-  char password[SECURITY_PASSWORD_SIZE] = "admin";
+  char username[SECURITY_USERNAME_SIZE] = "user";
+  char password[SECURITY_PASSWORD_SIZE] = "";
   uint8_t reserved[3] = {};
 };
 
@@ -292,6 +334,27 @@ struct TdsMonitorSnapshot {
   uint32_t nextPollMs = 0;
 };
 
+struct AirPurifierSnapshot {
+  bool enabled = false;
+  bool online = false;
+  bool purifierOn = false;
+  bool fanOn = false;
+  bool autoMode = false;
+  bool sensorOnline = false;
+  bool pmsPowered = false;
+  String address = "http://air-purifier.local/api/status";
+  String lastEvent = "Air purifier disabled";
+  float pm1 = NAN;
+  float pm25 = NAN;
+  float pm10 = NAN;
+  uint8_t aq = 0;
+  uint8_t fanSpeedPct = 0;
+  uint32_t sampleAgeMs = 0;
+  uint32_t lastPollMs = 0;
+  uint32_t lastSuccessMs = 0;
+  uint32_t nextPollMs = 0;
+};
+
 struct InverterFlowSnapshot {
   const char *name = "";
   bool online = false;
@@ -325,8 +388,13 @@ struct StoredLegacyFm225RadarSettings {
 };
 
 DashboardSettings settings;
+
+String relayConfigsJson(const RelayAutomationSettings &relaySettings);
+void updateRelayChannelSettingsFromForm(RelayAutomationSettings &relaySettings);
 Fm225RadarSettings fm225RadarSettings;
 TdsMonitorSettings tdsSettings;
+AirPurifierSettings airPurifierSettings;
+CommunicationSettings communicationSettings;
 InverterMonitorSettings inverterSettings;
 Mp3SoundSettings mp3SoundSettings;
 NetworkSettings networkSettings;
@@ -334,6 +402,7 @@ SecuritySettings securitySettings;
 LogSettings logSettings;
 EventLogRecord eventLogScratch[EVENT_LOG_MAX_RECORDS];
 TdsMonitorSnapshot tdsSnapshot;
+AirPurifierSnapshot airPurifierSnapshot;
 InverterFlowSnapshot solaxSnapshot{"Solax"};
 InverterFlowSnapshot nitroxSnapshot{"Nitrox"};
 InverterFlowSnapshot growattSnapshot{"Growatt"};
@@ -361,6 +430,8 @@ bool eventLogRfidKnown = false;
 uint32_t eventLogRfidReads = 0;
 bool webStorageLastSeedOk = false;
 String webStorageLastEvent = "Winbond web storage not seeded";
+uint32_t relayCommandPriorityUntilMs = 0;
+bool inverterSettingsLastSaveOk = true;
 bool smokeAlarmWasActive = false;
 bool otaServiceStarted = false;
 bool mdnsServiceStarted = false;
@@ -370,6 +441,7 @@ uint32_t wifiConnectStartedMs = 0;
 uint32_t wifiLastRetryMs = 0;
 
 String currentIpString();
+String formString(const char *name, const String &fallback = String());
 
 uint32_t fnv1aUpdate(uint32_t hash, const uint8_t *data, size_t length) {
   for (size_t i = 0; i < length; i++) {
@@ -397,6 +469,14 @@ uint32_t legacyFm225RadarSettingsCrc(const StoredLegacyFm225RadarSettings &store
 
 uint32_t tdsSettingsCrc(const StoredTdsMonitorSettings &stored) {
   return fnv1a(reinterpret_cast<const uint8_t *>(&stored), sizeof(StoredTdsMonitorSettings) - sizeof(stored.crc));
+}
+
+uint32_t airPurifierSettingsCrc(const StoredAirPurifierSettings &stored) {
+  return fnv1a(reinterpret_cast<const uint8_t *>(&stored), sizeof(StoredAirPurifierSettings) - sizeof(stored.crc));
+}
+
+uint32_t communicationSettingsCrc(const StoredCommunicationSettings &stored) {
+  return fnv1a(reinterpret_cast<const uint8_t *>(&stored), sizeof(StoredCommunicationSettings) - sizeof(stored.crc));
 }
 
 uint32_t inverterSettingsCrc(const StoredInverterMonitorSettings &stored) {
@@ -438,11 +518,12 @@ String sanitizeLoginText(String value, const char *fallback) {
 
 void sanitizeSecuritySettings(SecuritySettings &value) {
   const bool requestedLogin = value.loginEnabled;
-  String username = sanitizeLoginText(String(value.username), "admin");
+  String username = sanitizeLoginText(String(value.username), "user");
   memset(value.username, 0, sizeof(value.username));
   username.substring(0, SECURITY_USERNAME_SIZE - 1).toCharArray(value.username, SECURITY_USERNAME_SIZE);
 
-  String password = sanitizeLoginText(String(value.password), "admin");
+  String password = String(value.password);
+  password.trim();
   memset(value.password, 0, sizeof(value.password));
   password.substring(0, SECURITY_PASSWORD_SIZE - 1).toCharArray(value.password, SECURITY_PASSWORD_SIZE);
 
@@ -528,6 +609,28 @@ void sanitizeMp3SoundSettings(Mp3SoundSettings &value) {
   value.reserved[0] = 0;
 }
 
+void sanitizeCommunicationSettings(CommunicationSettings &value) {
+  const uint32_t rs485BaudRates[] = {9600, 19200, 38400, 57600, 115200};
+  bool validRs485 = false;
+  for (const uint32_t baudRate : rs485BaudRates) {
+    validRs485 = validRs485 || value.rs485BaudRate == baudRate;
+  }
+  if (!validRs485) {
+    value.rs485BaudRate = 9600;
+  }
+
+  const uint32_t canBitrates[] = {125000, 250000, 500000, 1000000};
+  bool validCan = false;
+  for (const uint32_t bitrate : canBitrates) {
+    validCan = validCan || value.canBitrate == bitrate;
+  }
+  if (!validCan) {
+    value.canBitrate = 500000;
+  }
+  memset(value.reserved0, 0, sizeof(value.reserved0));
+  memset(value.reserved1, 0, sizeof(value.reserved1));
+}
+
 void sanitizeFm225RadarSettings(Fm225RadarSettings &value) {
   value.faceVerificationEnabled = true;
   value.minDistanceCm = constrain(value.minDistanceCm, static_cast<uint16_t>(0), static_cast<uint16_t>(1000));
@@ -550,6 +653,23 @@ String normalizeTdsAddress(String address) {
   }
   if (!address.endsWith("/api/tds")) {
     address += "/api/tds";
+  }
+  return address;
+}
+
+String normalizeAirPurifierAddress(String address) {
+  address.trim();
+  if (address.length() == 0) {
+    address = "http://air-purifier.local/api/status";
+  }
+  if (!address.startsWith("http://") && !address.startsWith("https://")) {
+    address = "http://" + address;
+  }
+  if (address.endsWith("/")) {
+    address.remove(address.length() - 1);
+  }
+  if (!address.endsWith("/api/status")) {
+    address += "/api/status";
   }
   return address;
 }
@@ -586,6 +706,12 @@ void sanitizeTdsSettings(TdsMonitorSettings &value) {
   const String normalized = normalizeTdsAddress(String(value.address));
   memset(value.address, 0, sizeof(value.address));
   normalized.substring(0, TDS_ADDRESS_SIZE - 1).toCharArray(value.address, TDS_ADDRESS_SIZE);
+}
+
+void sanitizeAirPurifierSettings(AirPurifierSettings &value) {
+  const String normalized = normalizeAirPurifierAddress(String(value.address));
+  memset(value.address, 0, sizeof(value.address));
+  normalized.substring(0, AIR_PURIFIER_ADDRESS_SIZE - 1).toCharArray(value.address, AIR_PURIFIER_ADDRESS_SIZE);
 }
 
 void sanitizeInverterSettings(InverterMonitorSettings &value) {
@@ -634,7 +760,6 @@ void sanitizeInverterSettings(InverterMonitorSettings &value) {
 
   String growattToken = String(value.growattToken);
   growattToken.trim();
-  value.growattEnabled = value.growattEnabled && growattToken.length() > 0;
   memset(value.growattToken, 0, sizeof(value.growattToken));
   growattToken.substring(0, GROWATT_TOKEN_SIZE - 1).toCharArray(value.growattToken, GROWATT_TOKEN_SIZE);
   value.growattIntervalMs = constrain(value.growattIntervalMs, 60000UL, 3600000UL);
@@ -892,6 +1017,68 @@ bool saveTdsMonitorSettings() {
 
   return storageEraseSector(TDS_SETTINGS_ADDRESS) &&
          storageWriteBytes(TDS_SETTINGS_ADDRESS, reinterpret_cast<const uint8_t *>(&stored), sizeof(stored));
+}
+
+bool loadAirPurifierSettings() {
+  StoredAirPurifierSettings stored;
+  if (!storageReadBytes(AIR_PURIFIER_SETTINGS_ADDRESS, reinterpret_cast<uint8_t *>(&stored), sizeof(stored)) ||
+      stored.magic != AIR_PURIFIER_SETTINGS_MAGIC || stored.version != AIR_PURIFIER_SETTINGS_VERSION ||
+      stored.size != sizeof(StoredAirPurifierSettings) || stored.crc != airPurifierSettingsCrc(stored)) {
+    airPurifierSettings = AirPurifierSettings();
+    sanitizeAirPurifierSettings(airPurifierSettings);
+    return false;
+  }
+
+  airPurifierSettings = stored.settings;
+  sanitizeAirPurifierSettings(airPurifierSettings);
+  return true;
+}
+
+bool saveAirPurifierSettings() {
+  sanitizeAirPurifierSettings(airPurifierSettings);
+
+  StoredAirPurifierSettings stored;
+  stored.size = sizeof(StoredAirPurifierSettings);
+  stored.settings = airPurifierSettings;
+  stored.crc = airPurifierSettingsCrc(stored);
+
+  return storageEraseSector(AIR_PURIFIER_SETTINGS_ADDRESS) &&
+         storageWriteBytes(AIR_PURIFIER_SETTINGS_ADDRESS, reinterpret_cast<const uint8_t *>(&stored), sizeof(stored));
+}
+
+bool loadCommunicationSettings() {
+  StoredCommunicationSettings stored;
+  if (!storageReadBytes(COMMUNICATION_SETTINGS_ADDRESS, reinterpret_cast<uint8_t *>(&stored), sizeof(stored)) ||
+      stored.magic != COMMUNICATION_SETTINGS_MAGIC || stored.version != COMMUNICATION_SETTINGS_VERSION ||
+      stored.size != sizeof(StoredCommunicationSettings) || stored.crc != communicationSettingsCrc(stored)) {
+    communicationSettings = CommunicationSettings();
+    sanitizeCommunicationSettings(communicationSettings);
+    return false;
+  }
+
+  communicationSettings = stored.settings;
+  sanitizeCommunicationSettings(communicationSettings);
+  return true;
+}
+
+bool saveCommunicationSettings() {
+  sanitizeCommunicationSettings(communicationSettings);
+
+  StoredCommunicationSettings stored;
+  stored.size = sizeof(StoredCommunicationSettings);
+  stored.settings = communicationSettings;
+  stored.crc = communicationSettingsCrc(stored);
+
+  return storageEraseSector(COMMUNICATION_SETTINGS_ADDRESS) &&
+         storageWriteBytes(COMMUNICATION_SETTINGS_ADDRESS, reinterpret_cast<const uint8_t *>(&stored), sizeof(stored));
+}
+
+void applyCommunicationSettings() {
+  sanitizeCommunicationSettings(communicationSettings);
+  rs485SetBaudRate(communicationSettings.rs485BaudRate);
+  rs485SetEnabled(communicationSettings.rs485Enabled);
+  canBusSetBitrate(communicationSettings.canBitrate);
+  canBusSetEnabled(communicationSettings.canEnabled);
 }
 
 bool loadInverterSettings() {
@@ -1184,6 +1371,10 @@ void scheduleTdsPoll(uint32_t now, bool success) {
   tdsSnapshot.nextPollMs = now + (success ? TDS_POLL_INTERVAL_MS : API_FAILURE_BACKOFF_MS);
 }
 
+void scheduleAirPurifierPoll(uint32_t now, bool success) {
+  airPurifierSnapshot.nextPollMs = now + (success ? AIR_PURIFIER_POLL_INTERVAL_MS : API_FAILURE_BACKOFF_MS);
+}
+
 void scheduleInverterPoll(InverterFlowSnapshot &snapshot, uint32_t now, uint32_t intervalMs, bool success) {
   snapshot.nextPollMs = now + (success ? intervalMs : API_FAILURE_BACKOFF_MS);
 }
@@ -1245,6 +1436,100 @@ void pollTdsMonitor() {
     tdsSnapshot.online = false;
     tdsSnapshot.lastEvent = "TDS HTTP " + String(code);
     scheduleTdsPoll(now, false);
+  }
+  http.end();
+}
+
+void updateAirPurifierDisabledSnapshot() {
+  airPurifierSnapshot.enabled = false;
+  airPurifierSnapshot.online = false;
+  airPurifierSnapshot.address = String(airPurifierSettings.address);
+  airPurifierSnapshot.lastEvent = "Air purifier disabled";
+  airPurifierSnapshot.nextPollMs = 0;
+}
+
+bool jsonBoolField(const String &json, const char *field, bool &out) {
+  const String key = "\"" + String(field) + "\":";
+  int index = json.indexOf(key);
+  if (index < 0) {
+    return false;
+  }
+  index += key.length();
+  while (index < static_cast<int>(json.length()) && isspace(json[index])) {
+    index++;
+  }
+  if (json.substring(index, index + 4) == "true") {
+    out = true;
+    return true;
+  }
+  if (json.substring(index, index + 5) == "false") {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
+void applyAirPurifierPayload(const String &payload) {
+  float value = NAN;
+  bool boolValue = false;
+  if (jsonNumberField(payload, "pm1", value)) airPurifierSnapshot.pm1 = value;
+  if (jsonNumberField(payload, "pm25", value)) airPurifierSnapshot.pm25 = value;
+  if (jsonNumberField(payload, "pm10", value)) airPurifierSnapshot.pm10 = value;
+  if (jsonNumberField(payload, "aq", value)) airPurifierSnapshot.aq = static_cast<uint8_t>(constrain(static_cast<int>(value), 0, 255));
+  if (jsonNumberField(payload, "fan_speed_pct", value)) {
+    airPurifierSnapshot.fanSpeedPct = static_cast<uint8_t>(constrain(static_cast<int>(value), 0, 100));
+  }
+  if (jsonNumberField(payload, "age_ms", value)) airPurifierSnapshot.sampleAgeMs = static_cast<uint32_t>(value);
+  if (jsonBoolField(payload, "switch_on", boolValue)) airPurifierSnapshot.purifierOn = boolValue;
+  if (jsonBoolField(payload, "fan_on", boolValue)) airPurifierSnapshot.fanOn = boolValue;
+  if (jsonBoolField(payload, "auto_mode", boolValue)) airPurifierSnapshot.autoMode = boolValue;
+  if (jsonBoolField(payload, "sensor_online", boolValue)) airPurifierSnapshot.sensorOnline = boolValue;
+  if (jsonBoolField(payload, "pms_powered", boolValue)) airPurifierSnapshot.pmsPowered = boolValue;
+}
+
+void pollAirPurifier() {
+  airPurifierSnapshot.enabled = airPurifierSettings.enabled;
+  airPurifierSnapshot.address = String(airPurifierSettings.address);
+
+  if (!airPurifierSettings.enabled) {
+    updateAirPurifierDisabledSnapshot();
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (!pollDue(now, airPurifierSnapshot.nextPollMs)) {
+    return;
+  }
+  airPurifierSnapshot.lastPollMs = now;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    airPurifierSnapshot.online = false;
+    airPurifierSnapshot.lastEvent = "WiFi offline";
+    scheduleAirPurifierPoll(now, false);
+    return;
+  }
+
+  HTTPClient http;
+  http.setTimeout(AIR_PURIFIER_HTTP_TIMEOUT_MS);
+  if (!http.begin(airPurifierSnapshot.address)) {
+    airPurifierSnapshot.online = false;
+    airPurifierSnapshot.lastEvent = "Invalid air purifier address";
+    scheduleAirPurifierPoll(now, false);
+    return;
+  }
+
+  const int code = http.GET();
+  if (code == HTTP_CODE_OK) {
+    const String payload = http.getString();
+    applyAirPurifierPayload(payload);
+    airPurifierSnapshot.online = true;
+    airPurifierSnapshot.lastSuccessMs = now;
+    airPurifierSnapshot.lastEvent = "Air purifier online";
+    scheduleAirPurifierPoll(now, true);
+  } else {
+    airPurifierSnapshot.online = false;
+    airPurifierSnapshot.lastEvent = "Air purifier HTTP " + String(code);
+    scheduleAirPurifierPoll(now, false);
   }
   http.end();
 }
@@ -1681,6 +1966,36 @@ void pollInverters() {
   nextPoller = (nextPoller + 1) % 3;
 }
 
+void pollExternalMonitor() {
+  const uint32_t now = millis();
+  if (relayCommandPriorityUntilMs != 0 && static_cast<int32_t>(now - relayCommandPriorityUntilMs) < 0) {
+    return;
+  }
+  static uint8_t nextPoller = 0;
+  switch (nextPoller) {
+    case 0:
+      pollTdsMonitor();
+      break;
+    case 1:
+      pollAirPurifier();
+      break;
+    case 2:
+      pollSolaxInverter();
+      break;
+    case 3:
+      pollNitroxInverter();
+      break;
+    default:
+      pollGrowattInverter();
+      break;
+  }
+  nextPoller = (nextPoller + 1) % 5;
+}
+
+void noteRelayCommandPriority() {
+  relayCommandPriorityUntilMs = millis() + RELAY_COMMAND_PRIORITY_WINDOW_MS;
+}
+
 bool mq135SmokeAlarmActive(const ModuleSnapshot &modules) {
   return modules.mq135AnalogRaw >= mp3SoundSettings.smokeAlarmThresholdRaw;
 }
@@ -1872,9 +2187,9 @@ void handleFm225Image(const FM225::ImageInfo &info) {
   setFm225Event("Image packet " + String(info.packetCount));
 }
 
-String relayJson(uint8_t relayState) {
+String relayJson(uint16_t relayState) {
   String json = "[";
-  for (uint8_t channel = 0; channel < 8; channel++) {
+  for (uint8_t channel = 0; channel < RELAY_CHANNEL_COUNT; channel++) {
     if (channel > 0) {
       json += ",";
     }
@@ -1884,25 +2199,14 @@ String relayJson(uint8_t relayState) {
   return json;
 }
 
-uint8_t countActiveRelays(uint8_t relayState) {
+uint8_t countActiveRelays(uint16_t relayState) {
   uint8_t count = 0;
-  for (uint8_t channel = 0; channel < 8; channel++) {
+  for (uint8_t channel = 0; channel < RELAY_CHANNEL_COUNT; channel++) {
     if ((relayState & (1U << channel)) != 0) {
       count++;
     }
   }
   return count;
-}
-
-bool serveFile(const String &path) {
-  if (!LittleFS.exists(path)) {
-    return false;
-  }
-
-  File file = LittleFS.open(path, "r");
-  server.streamFile(file, contentTypeFor(path));
-  file.close();
-  return true;
 }
 
 bool readWebStorageHeader(WebStorageHeader &header) {
@@ -1979,7 +2283,13 @@ bool serveWebStorageFile(const String &path) {
   uint32_t remaining = entry->length;
   uint32_t address = WEB_STORAGE_ADDRESS + entry->offset;
 
-  server.sendHeader("Cache-Control", "no-store");
+  if (path == "/index.html") {
+    server.sendHeader("Cache-Control", "no-cache");
+  } else if (path == "/techpanda.png") {
+    server.sendHeader("Cache-Control", "public, max-age=86400");
+  } else {
+    server.sendHeader("Cache-Control", "public, max-age=300");
+  }
   server.setContentLength(entry->length);
   server.send(200, contentTypeFor(path), "");
 
@@ -2012,72 +2322,56 @@ bool webStorageReady() {
   return webStorageFileCount() > 0;
 }
 
-uint32_t crcLittleFsFile(const char *path, uint32_t &length) {
-  length = 0;
-  File file = LittleFS.open(path, "r");
-  if (!file) {
-    return 0;
-  }
-
-  uint8_t buffer[256];
+uint32_t crcGeneratedAsset(const GeneratedWebAsset &asset) {
   uint32_t hash = 2166136261UL;
-  while (file.available()) {
-    const size_t bytesRead = file.read(buffer, sizeof(buffer));
-    hash = fnv1aUpdate(hash, buffer, bytesRead);
-    length += bytesRead;
+  for (uint32_t offset = 0; offset < asset.length; offset++) {
+    const uint8_t value = pgm_read_byte(asset.data + offset);
+    hash = fnv1aUpdate(hash, &value, 1);
   }
-  file.close();
   return hash;
 }
 
-bool writeLittleFsFileToStorage(const char *path, uint32_t offset) {
-  File file = LittleFS.open(path, "r");
-  if (!file) {
-    return false;
-  }
-
+bool writeGeneratedAssetToStorage(const GeneratedWebAsset &asset, uint32_t offset) {
   uint8_t buffer[256];
   uint32_t address = WEB_STORAGE_ADDRESS + offset;
-  while (file.available()) {
-    const size_t bytesRead = file.read(buffer, sizeof(buffer));
-    if (!storageWriteBytes(address, buffer, bytesRead)) {
-      file.close();
+  uint32_t remaining = asset.length;
+  uint32_t sourceOffset = 0;
+
+  while (remaining > 0) {
+    const size_t chunk = min(static_cast<uint32_t>(sizeof(buffer)), remaining);
+    for (size_t i = 0; i < chunk; i++) {
+      buffer[i] = pgm_read_byte(asset.data + sourceOffset + i);
+    }
+    if (!storageWriteBytes(address, buffer, chunk)) {
       return false;
     }
-    address += bytesRead;
+    address += chunk;
+    sourceOffset += chunk;
+    remaining -= chunk;
   }
 
-  file.close();
   return true;
 }
 
-bool seedWebStorageFromLittleFs() {
+bool seedWebStorageFromGeneratedAssets() {
   WebStorageHeader header;
   header.size = sizeof(WebStorageHeader);
-  header.fileCount = WEB_STORAGE_FILE_COUNT;
+  header.fileCount = GENERATED_WEB_ASSET_COUNT;
 
   uint32_t nextOffset = WEB_STORAGE_HEADER_BYTES;
-  for (uint8_t i = 0; i < WEB_STORAGE_FILE_COUNT; i++) {
-    const char *path = WEB_STORAGE_PATHS[i];
-    if (!LittleFS.exists(path)) {
+  for (uint8_t i = 0; i < GENERATED_WEB_ASSET_COUNT; i++) {
+    const GeneratedWebAsset &asset = GENERATED_WEB_ASSETS[i];
+    if (asset.length == 0 || nextOffset + asset.length > WEB_STORAGE_BYTES) {
       webStorageLastSeedOk = false;
-      webStorageLastEvent = String("Missing LittleFS file ") + path;
+      webStorageLastEvent = String("Invalid generated web asset ") + asset.path;
       return false;
     }
 
-    uint32_t length = 0;
-    const uint32_t crc = crcLittleFsFile(path, length);
-    if (length == 0 || nextOffset + length > WEB_STORAGE_BYTES) {
-      webStorageLastSeedOk = false;
-      webStorageLastEvent = String("Invalid web file ") + path;
-      return false;
-    }
-
-    strlcpy(header.files[i].path, path, sizeof(header.files[i].path));
+    strlcpy(header.files[i].path, asset.path, sizeof(header.files[i].path));
     header.files[i].offset = nextOffset;
-    header.files[i].length = length;
-    header.files[i].crc = crc;
-    nextOffset += length;
+    header.files[i].length = asset.length;
+    header.files[i].crc = crcGeneratedAsset(asset);
+    nextOffset += asset.length;
   }
 
   const uint32_t eraseBytes = ((nextOffset + WEB_STORAGE_SECTOR_BYTES - 1) / WEB_STORAGE_SECTOR_BYTES) * WEB_STORAGE_SECTOR_BYTES;
@@ -2089,8 +2383,8 @@ bool seedWebStorageFromLittleFs() {
     }
   }
 
-  for (uint8_t i = 0; i < WEB_STORAGE_FILE_COUNT; i++) {
-    if (!writeLittleFsFileToStorage(header.files[i].path, header.files[i].offset)) {
+  for (uint8_t i = 0; i < GENERATED_WEB_ASSET_COUNT; i++) {
+    if (!writeGeneratedAssetToStorage(GENERATED_WEB_ASSETS[i], header.files[i].offset)) {
       webStorageLastSeedOk = false;
       webStorageLastEvent = String("Winbond web write failed ") + header.files[i].path;
       return false;
@@ -2099,8 +2393,33 @@ bool seedWebStorageFromLittleFs() {
 
   header.crc = webStorageHeaderCrc(header);
   webStorageLastSeedOk = storageWriteBytes(WEB_STORAGE_ADDRESS, reinterpret_cast<const uint8_t *>(&header), sizeof(header));
-  webStorageLastEvent = webStorageLastSeedOk ? "Winbond web files seeded" : "Winbond web header write failed";
+  webStorageLastEvent = webStorageLastSeedOk ? "Winbond web files seeded from firmware assets" : "Winbond web header write failed";
   return webStorageLastSeedOk;
+}
+
+bool webStorageMatchesGeneratedAssets() {
+  WebStorageHeader header;
+  if (!readWebStorageHeader(header) || header.fileCount != GENERATED_WEB_ASSET_COUNT) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < GENERATED_WEB_ASSET_COUNT; i++) {
+    const GeneratedWebAsset &asset = GENERATED_WEB_ASSETS[i];
+    const WebStorageEntry *entry = findWebStorageEntry(header, asset.path);
+    if (entry == nullptr || entry->length != asset.length || entry->crc != crcGeneratedAsset(asset)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void ensureWebStorageSeeded() {
+  if (webStorageMatchesGeneratedAssets()) {
+    webStorageLastSeedOk = true;
+    webStorageLastEvent = "Winbond web files match firmware assets";
+    return;
+  }
+  seedWebStorageFromGeneratedAssets();
 }
 
 bool isAuthenticated() {
@@ -2128,6 +2447,18 @@ void sendLoginPage(const String &message = "") {
   html += "<label>Username<input name=\"username\" type=\"text\" autocomplete=\"username\"></label>";
   html += "<label>Password<input name=\"password\" type=\"password\" autocomplete=\"current-password\"></label>";
   html += "<button type=\"submit\">Login</button></form></body></html>";
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "text/html", html);
+}
+
+void sendWebStorageSeedPage() {
+  String html = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
+  html += "<title>Seed Web Storage</title><style>";
+  html += "body{margin:0;min-height:100vh;display:grid;place-items:center;background:#08111f;color:#eaf6ff;font-family:system-ui,Segoe UI,sans-serif}";
+  html += "main{width:min(100% - 32px,430px);display:grid;gap:14px;padding:24px;background:#101722;border:1px solid rgba(125,211,252,.28);border-radius:10px;box-shadow:0 24px 80px rgba(0,0,0,.35)}";
+  html += "h1{margin:0;font-size:1.35rem}p{margin:0;color:#b9d7ff;line-height:1.45}button{height:44px;color:#03111f;font-weight:800;background:#7dd3fc;border:0;border-radius:6px}</style></head>";
+  html += "<body><main><h1>Winbond Web Storage</h1><p>The dashboard files are packed in firmware but have not been copied into the external Winbond flash yet.</p>";
+  html += "<form method=\"post\" action=\"/api/web-storage/seed\"><button type=\"submit\">Seed Web Storage</button></form></main></body></html>";
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "text/html", html);
 }
@@ -2161,8 +2492,8 @@ void handleRoot() {
   if (!requireAuth()) {
     return;
   }
-  if (!serveWebStorageFile("/index.html") && !serveFile("/index.html")) {
-    server.send(500, "text/plain", "Missing /index.html. Seed Winbond web storage or upload LittleFS with: platformio run --target uploadfs");
+  if (!serveWebStorageFile("/index.html")) {
+    sendWebStorageSeedPage();
   }
 }
 
@@ -2175,7 +2506,7 @@ void handleStaticFile() {
     path = "/index.html";
   }
 
-  if (serveWebStorageFile(path) || serveFile(path)) {
+  if (serveWebStorageFile(path)) {
     return;
   }
 
@@ -2205,11 +2536,17 @@ void handleStatusApi() {
   const std::vector<String> rfidTags = rdmGetTags();
   const std::vector<String> rfidPendingTags = rdmGetPendingTags();
   const RelayAutomationSnapshot automation = relayAutomationGetSnapshot();
+  const RS485Status rs485 = rs485GetStatus();
+  const CANBusStatus can = canBusGetStatus();
   const int energyWatts = 420 + static_cast<int>((sinf(millis() / 30000.0f) + 1.0f) * 65.0f);
   const uint8_t activeRelays = countActiveRelays(modules.relayState);
+  const float esp32TemperatureC = temperatureRead();
+  const String firmwareBuild = String("AP-FW ") + __DATE__ + " " + __TIME__;
 
   String json = "{";
   json += "\"deviceName\":\"" + jsonEscape(settings.deviceName) + "\",";
+  json += "\"firmware\":\"" + jsonEscape(firmwareBuild) + "\",";
+  json += "\"esp32Temperature\":" + jsonFloatOrNull(esp32TemperatureC, 1) + ",";
   json += "\"uptimeSeconds\":" + String(millis() / 1000) + ",";
   json += "\"wifiConnected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") + ",";
   json += "\"ip\":\"" + currentIpString() + "\",";
@@ -2220,8 +2557,8 @@ void handleStatusApi() {
   json += "\"lux\":" + jsonFloatOrNull(modules.lux, 1) + ",";
   json += "\"bh1750Online\":" + String(modules.bh1750Online ? "true" : "false") + ",";
   json += "\"sht3xOnline\":" + String(modules.sht3xOnline ? "true" : "false") + ",";
-  json += "\"pcf8574Online\":" + String(modules.pcf8574Online ? "true" : "false") + ",";
-  json += "\"pcf8574Address\":" + String(modules.pcf8574Address) + ",";
+  json += "\"mcp23017Online\":" + String(modules.mcp23017Online ? "true" : "false") + ",";
+  json += "\"mcp23017Address\":" + String(modules.mcp23017Address) + ",";
   json += "\"i2cErrorCount\":" + String(modules.i2cErrorCount) + ",";
   json += "\"mq135DigitalActive\":" + String(modules.mq135DigitalActive ? "true" : "false") + ",";
   json += "\"mq135AlarmActive\":" + String(mq135AlarmActive ? "true" : "false") + ",";
@@ -2245,6 +2582,21 @@ void handleStatusApi() {
   json += "\"webStorageFileCount\":" + String(webStorageFileCount()) + ",";
   json += "\"webStorageLastSeedOk\":" + String(webStorageLastSeedOk ? "true" : "false") + ",";
   json += "\"webStorageLastEvent\":\"" + jsonEscape(webStorageLastEvent) + "\",";
+  json += "\"rs485Enabled\":" + String(rs485.enabled ? "true" : "false") + ",";
+  json += "\"rs485Ready\":" + String(rs485.ready ? "true" : "false") + ",";
+  json += "\"rs485Error\":" + String(rs485.error ? "true" : "false") + ",";
+  json += "\"rs485Status\":\"" + jsonEscape(rs485.ready ? "Ready" : rs485.lastError) + "\",";
+  json += "\"rs485BaudRate\":" + String(rs485.baudRate) + ",";
+  json += "\"rs485RxPin\":" + String(PIN_RS485_RX) + ",";
+  json += "\"rs485TxPin\":" + String(PIN_RS485_TX) + ",";
+  json += "\"rs485DirectionPin\":" + String(PIN_RS485_DE_RE) + ",";
+  json += "\"canEnabled\":" + String(can.enabled ? "true" : "false") + ",";
+  json += "\"canReady\":" + String(can.ready ? "true" : "false") + ",";
+  json += "\"canError\":" + String(can.error ? "true" : "false") + ",";
+  json += "\"canStatus\":\"" + jsonEscape(can.ready ? "Ready" : can.lastError) + "\",";
+  json += "\"canBitrate\":" + String(can.bitrate) + ",";
+  json += "\"canTxPin\":" + String(PIN_CAN_TX) + ",";
+  json += "\"canRxPin\":" + String(PIN_CAN_RX) + ",";
   json += "\"tdsMonitorEnabled\":" + String(tdsSnapshot.enabled ? "true" : "false") + ",";
   json += "\"tdsMonitorOnline\":" + String(tdsSnapshot.online ? "true" : "false") + ",";
   json += "\"tdsMonitorAddress\":\"" + jsonEscape(tdsSnapshot.address) + "\",";
@@ -2260,6 +2612,22 @@ void handleStatusApi() {
   json += "\"tdsTankCapacityLiters\":" + jsonFloatValue(tdsSnapshot.tankCapacityLiters, 1) + ",";
   json += "\"tdsSampleAgeMs\":" + String(tdsSnapshot.sampleAgeMs) + ",";
   json += "\"tdsLastSuccessAgeMs\":" + String(tdsSnapshot.lastSuccessMs == 0 ? 0 : millis() - tdsSnapshot.lastSuccessMs) + ",";
+  json += "\"airPurifierEnabled\":" + String(airPurifierSnapshot.enabled ? "true" : "false") + ",";
+  json += "\"airPurifierOnline\":" + String(airPurifierSnapshot.online ? "true" : "false") + ",";
+  json += "\"airPurifierOn\":" + String(airPurifierSnapshot.purifierOn ? "true" : "false") + ",";
+  json += "\"airPurifierFanOn\":" + String(airPurifierSnapshot.fanOn ? "true" : "false") + ",";
+  json += "\"airPurifierAutoMode\":" + String(airPurifierSnapshot.autoMode ? "true" : "false") + ",";
+  json += "\"airPurifierSensorOnline\":" + String(airPurifierSnapshot.sensorOnline ? "true" : "false") + ",";
+  json += "\"airPurifierPmsPowered\":" + String(airPurifierSnapshot.pmsPowered ? "true" : "false") + ",";
+  json += "\"airPurifierAddress\":\"" + jsonEscape(airPurifierSnapshot.address) + "\",";
+  json += "\"airPurifierLastEvent\":\"" + jsonEscape(airPurifierSnapshot.lastEvent) + "\",";
+  json += "\"airPurifierPm1\":" + jsonFloatValue(airPurifierSnapshot.pm1, 1) + ",";
+  json += "\"airPurifierPm25\":" + jsonFloatValue(airPurifierSnapshot.pm25, 1) + ",";
+  json += "\"airPurifierPm10\":" + jsonFloatValue(airPurifierSnapshot.pm10, 1) + ",";
+  json += "\"airPurifierAq\":" + String(airPurifierSnapshot.aq) + ",";
+  json += "\"airPurifierFanSpeedPct\":" + String(airPurifierSnapshot.fanSpeedPct) + ",";
+  json += "\"airPurifierSampleAgeMs\":" + String(airPurifierSnapshot.sampleAgeMs) + ",";
+  json += "\"airPurifierLastSuccessAgeMs\":" + String(airPurifierSnapshot.lastSuccessMs == 0 ? 0 : millis() - airPurifierSnapshot.lastSuccessMs) + ",";
   json += "\"solaxEnabled\":" + String(inverterSettings.solaxEnabled ? "true" : "false") + ",";
   json += "\"solaxOnline\":" + String(solaxSnapshot.online ? "true" : "false") + ",";
   json += "\"solaxLastEvent\":\"" + jsonEscape(solaxSnapshot.lastEvent) + "\",";
@@ -2405,6 +2773,7 @@ void handleStatusApi() {
   json += "\"climateValid\":" + String(modules.climateValid ? "true" : "false") + ",";
   json += "\"relayState\":" + String(modules.relayState) + ",";
   json += "\"relays\":" + relayJson(modules.relayState) + ",";
+  json += "\"relayConfigs\":" + relayConfigsJson(automation.settings) + ",";
   json += "\"activeRelays\":" + String(activeRelays) + ",";
   json += "\"energyWatts\":" + String(energyWatts) + ",";
   json += "\"activeDevices\":" + String(activeRelays) + ",";
@@ -2458,6 +2827,17 @@ void handleGetSettingsApi() {
   json += "\"mp3SmokeAlarmThresholdRaw\":" + String(mp3SoundSettings.smokeAlarmThresholdRaw) + ",";
   json += "\"tdsMonitorEnabled\":" + String(tdsSettings.enabled ? "true" : "false") + ",";
   json += "\"tdsMonitorAddress\":\"" + jsonEscape(String(tdsSettings.address)) + "\",";
+  json += "\"airPurifierEnabled\":" + String(airPurifierSettings.enabled ? "true" : "false") + ",";
+  json += "\"airPurifierAddress\":\"" + jsonEscape(String(airPurifierSettings.address)) + "\",";
+  json += "\"rs485Enabled\":" + String(communicationSettings.rs485Enabled ? "true" : "false") + ",";
+  json += "\"rs485BaudRate\":" + String(communicationSettings.rs485BaudRate) + ",";
+  json += "\"rs485RxPin\":" + String(PIN_RS485_RX) + ",";
+  json += "\"rs485TxPin\":" + String(PIN_RS485_TX) + ",";
+  json += "\"rs485DirectionPin\":" + String(PIN_RS485_DE_RE) + ",";
+  json += "\"canEnabled\":" + String(communicationSettings.canEnabled ? "true" : "false") + ",";
+  json += "\"canBitrate\":" + String(communicationSettings.canBitrate) + ",";
+  json += "\"canTxPin\":" + String(PIN_CAN_TX) + ",";
+  json += "\"canRxPin\":" + String(PIN_CAN_RX) + ",";
   json += "\"solaxEnabled\":" + String(inverterSettings.solaxEnabled ? "true" : "false") + ",";
   json += "\"solaxAddress\":\"" + jsonEscape(String(inverterSettings.solaxAddress)) + "\",";
   json += "\"solaxPassword\":\"" + jsonEscape(String(inverterSettings.solaxPassword)) + "\",";
@@ -2473,13 +2853,15 @@ void handleGetSettingsApi() {
   json += "\"growattToken\":\"" + jsonEscape(String(inverterSettings.growattToken)) + "\",";
   json += "\"growattPlantId\":" + String(inverterSettings.growattPlantId) + ",";
   json += "\"growattIntervalMs\":" + String(inverterSettings.growattIntervalMs) + ",";
+  json += "\"inverterSettingsSaved\":" + String(inverterSettingsLastSaveOk ? "true" : "false") + ",";
   json += "\"fm225RadarPresenceEnabled\":" + String(fm225RadarSettings.enabled ? "true" : "false") + ",";
   json += "\"fm225RadarMinDistanceCm\":" + String(fm225RadarSettings.minDistanceCm) + ",";
   json += "\"fm225RadarMinEnergy\":" + String(fm225RadarSettings.minEnergy) + ",";
   json += "\"outdoorLightMode\":\"" + String(relayAutomationModeName(relaySettings.outdoorLightMode)) + "\",";
   json += "\"exhaustFanMode\":\"" + String(relayAutomationModeName(relaySettings.exhaustFanMode)) + "\",";
   json += "\"motionLight1Mode\":\"" + String(relayAutomationModeName(relaySettings.motionLight1Mode)) + "\",";
-  json += "\"motionLight2Mode\":\"" + String(relayAutomationModeName(relaySettings.motionLight2Mode)) + "\"";
+  json += "\"motionLight2Mode\":\"" + String(relayAutomationModeName(relaySettings.motionLight2Mode)) + "\",";
+  json += "\"relayConfigs\":" + relayConfigsJson(relaySettings);
   json += "}";
 
   server.sendHeader("Cache-Control", "no-store");
@@ -2554,6 +2936,100 @@ float boundedFormFloat(const char *name, float fallback, float minimum, float ma
     return fallback;
   }
   return constrain(value, minimum, maximum);
+}
+
+String relayConfigField(uint8_t channel, const char *field) {
+  return "relay" + String(channel + 1) + field;
+}
+
+String relayPinName(uint8_t channel) {
+  return String(channel < 8 ? "GPA" : "GPB") + String(channel % 8);
+}
+
+String relayConfigsJson(const RelayAutomationSettings &relaySettings) {
+  String json = "[";
+  for (uint8_t channel = 0; channel < RELAY_CHANNEL_COUNT; channel++) {
+    if (channel > 0) {
+      json += ",";
+    }
+    const RelayChannelConfig &config = relaySettings.channels[channel];
+    json += "{";
+    json += "\"channel\":" + String(channel) + ",";
+    json += "\"relayNumber\":" + String(channel + 1) + ",";
+    json += "\"mcpPin\":\"" + relayPinName(channel) + "\",";
+    json += "\"name\":\"" + jsonEscape(String(config.name)) + "\",";
+    json += "\"mode\":\"" + String(relayChannelModeName(config.mode)) + "\",";
+    json += "\"showInDashboard\":" + String(config.showInDashboard ? "true" : "false") + ",";
+    json += "\"currentState\":" + String(relayGet(channel) ? "true" : "false") + ",";
+    json += "\"pulseDurationMs\":" + String(config.pulseDurationMs) + ",";
+    json += "\"pulseRole\":\"" + String(relayPulseRoleName(config.pulseRole)) + "\",";
+    json += "\"automaticControlType\":\"" + String(relayAutomaticControlTypeName(config.automaticControlType)) + "\",";
+    json += "\"sensor\":\"" + String(relaySensorTypeName(config.sensor)) + "\",";
+    json += "\"comparison\":\"" + String(relayComparisonConditionName(config.comparison)) + "\",";
+    json += "\"onThreshold\":" + String(config.onThreshold, 1) + ",";
+    json += "\"offThreshold\":" + String(config.offThreshold, 1) + ",";
+    json += "\"scheduleOnMinutes\":" + String(config.scheduleOnMinutes) + ",";
+    json += "\"scheduleOffMinutes\":" + String(config.scheduleOffMinutes) + ",";
+    json += "\"enabledWeekdays\":" + String(config.enabledWeekdays);
+    json += "}";
+  }
+  json += "]";
+  return json;
+}
+
+void updateRelayChannelSettingsFromForm(RelayAutomationSettings &relaySettings) {
+  for (uint8_t channel = 0; channel < RELAY_CHANNEL_COUNT; channel++) {
+    RelayChannelConfig &config = relaySettings.channels[channel];
+    const String nameField = relayConfigField(channel, "Name");
+    if (server.hasArg(nameField)) {
+      String name = server.arg(nameField);
+      name.trim();
+      if (name.length() == 0) {
+        name = "Relay " + String(channel + 1);
+      }
+      memset(config.name, 0, sizeof(config.name));
+      name.substring(0, sizeof(config.name) - 1).toCharArray(config.name, sizeof(config.name));
+    }
+
+    const String modeField = relayConfigField(channel, "Mode");
+    RelayChannelMode mode;
+    if (server.hasArg(modeField) && relayAutomationParseChannelMode(server.arg(modeField), mode)) {
+      config.mode = mode;
+    }
+
+    config.showInDashboard = formBool(relayConfigField(channel, "ShowInDashboard").c_str());
+    config.currentState = formBool(relayConfigField(channel, "CurrentState").c_str());
+    config.pulseDurationMs =
+      static_cast<uint32_t>(boundedFormInt(relayConfigField(channel, "PulseDurationMs").c_str(), config.pulseDurationMs, 100, 604800000));
+    RelayPulseRole pulseRole;
+    if (server.hasArg(relayConfigField(channel, "PulseRole")) &&
+        relayAutomationParsePulseRole(server.arg(relayConfigField(channel, "PulseRole")), pulseRole)) {
+      config.pulseRole = pulseRole;
+    }
+    RelayAutomaticControlType automaticType;
+    if (server.hasArg(relayConfigField(channel, "AutomaticControlType")) &&
+        relayAutomationParseAutomaticControlType(server.arg(relayConfigField(channel, "AutomaticControlType")), automaticType)) {
+      config.automaticControlType = automaticType;
+    }
+    RelaySensorType sensor;
+    if (server.hasArg(relayConfigField(channel, "Sensor")) &&
+        relayAutomationParseSensorType(server.arg(relayConfigField(channel, "Sensor")), sensor)) {
+      config.sensor = sensor;
+    }
+    RelayComparisonCondition condition;
+    if (server.hasArg(relayConfigField(channel, "Comparison")) &&
+        relayAutomationParseComparisonCondition(server.arg(relayConfigField(channel, "Comparison")), condition)) {
+      config.comparison = condition;
+    }
+    config.onThreshold = boundedFormFloat(relayConfigField(channel, "OnThreshold").c_str(), config.onThreshold, -100.0f, 100000.0f);
+    config.offThreshold = boundedFormFloat(relayConfigField(channel, "OffThreshold").c_str(), config.offThreshold, -100.0f, 100000.0f);
+    config.scheduleOnMinutes =
+      static_cast<uint16_t>(boundedFormInt(relayConfigField(channel, "ScheduleOnMinutes").c_str(), config.scheduleOnMinutes, 0, 1439));
+    config.scheduleOffMinutes =
+      static_cast<uint16_t>(boundedFormInt(relayConfigField(channel, "ScheduleOffMinutes").c_str(), config.scheduleOffMinutes, 0, 1439));
+    config.enabledWeekdays =
+      static_cast<uint8_t>(boundedFormInt(relayConfigField(channel, "EnabledWeekdays").c_str(), config.enabledWeekdays, 0, 127));
+  }
 }
 
 void handlePostSettingsApi() {
@@ -2679,6 +3155,28 @@ void handlePostSettingsApi() {
   if (!tdsSettings.enabled) {
     updateTdsDisabledSnapshot();
   }
+  airPurifierSettings.enabled = formBool("airPurifierEnabled");
+  if (server.hasArg("airPurifierAddress")) {
+    const String address = normalizeAirPurifierAddress(server.arg("airPurifierAddress"));
+    memset(airPurifierSettings.address, 0, sizeof(airPurifierSettings.address));
+    address.substring(0, AIR_PURIFIER_ADDRESS_SIZE - 1).toCharArray(airPurifierSettings.address, AIR_PURIFIER_ADDRESS_SIZE);
+  }
+  saveAirPurifierSettings();
+  airPurifierSnapshot.lastPollMs = 0;
+  airPurifierSnapshot.nextPollMs = 0;
+  airPurifierSnapshot.address = String(airPurifierSettings.address);
+  if (!airPurifierSettings.enabled) {
+    updateAirPurifierDisabledSnapshot();
+  }
+  communicationSettings.rs485Enabled = formBool("rs485Enabled");
+  communicationSettings.rs485BaudRate =
+    static_cast<uint32_t>(boundedFormInt("rs485BaudRate", communicationSettings.rs485BaudRate, 1200, 921600));
+  communicationSettings.canEnabled = formBool("canEnabled");
+  communicationSettings.canBitrate =
+    static_cast<uint32_t>(boundedFormInt("canBitrate", communicationSettings.canBitrate, 125000, 1000000));
+  sanitizeCommunicationSettings(communicationSettings);
+  saveCommunicationSettings();
+  applyCommunicationSettings();
   inverterSettings.solaxEnabled = formBool("solaxEnabled");
   if (server.hasArg("solaxAddress")) {
     const String address = normalizeSolaxAddress(server.arg("solaxAddress"));
@@ -2709,6 +3207,7 @@ void handlePostSettingsApi() {
   inverterSettings.nitroxIntervalMs =
     static_cast<uint32_t>(boundedFormInt("nitroxIntervalSeconds", inverterSettings.nitroxIntervalMs / 1000, 5, 300)) * 1000UL;
   inverterSettings.growattEnabled = formBool("growattEnabled");
+  const bool requestedGrowattEnabled = inverterSettings.growattEnabled;
   if (server.hasArg("growattBaseUrl")) {
     const String baseUrl = normalizeGrowattBaseUrl(server.arg("growattBaseUrl"));
     memset(inverterSettings.growattBaseUrl, 0, sizeof(inverterSettings.growattBaseUrl));
@@ -2724,7 +3223,9 @@ void handlePostSettingsApi() {
     static_cast<uint32_t>(boundedFormInt("growattPlantId", inverterSettings.growattPlantId, 0, 2147483647));
   inverterSettings.growattIntervalMs =
     static_cast<uint32_t>(boundedFormInt("growattIntervalSeconds", inverterSettings.growattIntervalMs / 1000, 60, 3600)) * 1000UL;
-  saveInverterSettings();
+  sanitizeInverterSettings(inverterSettings);
+  inverterSettings.growattEnabled = requestedGrowattEnabled;
+  inverterSettingsLastSaveOk = saveInverterSettings();
   solaxSnapshot.lastPollMs = 0;
   nitroxSnapshot.lastPollMs = 0;
   growattSnapshot.lastPollMs = 0;
@@ -2763,6 +3264,7 @@ void handlePostSettingsApi() {
   if (server.hasArg("motionLight2Mode") && relayAutomationParseMode(server.arg("motionLight2Mode"), automationMode)) {
     relaySettings.motionLight2Mode = automationMode;
   }
+  updateRelayChannelSettingsFromForm(relaySettings);
   relayAutomationUpdateSettings(relaySettings);
 
   handleGetSettingsApi();
@@ -2775,7 +3277,7 @@ bool parseRelayChannel(uint8_t &channel) {
   }
 
   const int parsedChannel = server.arg("channel").toInt();
-  if (parsedChannel < 0 || parsedChannel > 7) {
+  if (parsedChannel < 0 || parsedChannel >= RELAY_CHANNEL_COUNT) {
     server.send(400, "application/json", "{\"error\":\"invalid_channel\"}");
     return false;
   }
@@ -2788,7 +3290,7 @@ void sendRelayApiResponse(bool ok) {
   const ModuleSnapshot modules = modulesGetSnapshot();
   String json = "{";
   json += "\"ok\":" + String(ok ? "true" : "false") + ",";
-  json += "\"pcf8574Online\":" + String(modules.pcf8574Online ? "true" : "false") + ",";
+  json += "\"mcp23017Online\":" + String(modules.mcp23017Online ? "true" : "false") + ",";
   json += "\"relayState\":" + String(modules.relayState) + ",";
   json += "\"relays\":" + relayJson(modules.relayState);
   json += "}";
@@ -2820,7 +3322,7 @@ int formInt(const char *name, int fallback) {
   return server.arg(name).toInt();
 }
 
-String formString(const char *name, const String &fallback = String()) {
+String formString(const char *name, const String &fallback) {
   if (!server.hasArg(name)) {
     return fallback;
   }
@@ -2899,6 +3401,7 @@ void sendRfidApiResponse(bool ok = true) {
 }
 
 void handleRelayApi() {
+  noteRelayCommandPriority();
   uint8_t channel = 0;
   if (!parseRelayChannel(channel)) {
     return;
@@ -2909,10 +3412,16 @@ void handleRelayApi() {
     return;
   }
 
-  sendRelayApiResponse(relaySet(channel, server.arg("enabled") == "true"));
+  const bool enabled = server.arg("enabled") == "true";
+  if (enabled && !relayAutomationChannelEnabled(channel)) {
+    sendRelayApiResponse(false);
+    return;
+  }
+  sendRelayApiResponse(relaySet(channel, enabled));
 }
 
 void handleRelayInchingApi() {
+  noteRelayCommandPriority();
   uint8_t channel = 0;
   if (!parseRelayChannel(channel)) {
     return;
@@ -2924,7 +3433,33 @@ void handleRelayInchingApi() {
     return;
   }
 
+  if (!relayAutomationChannelAllowsPulse(channel)) {
+    sendRelayApiResponse(false);
+    return;
+  }
   sendRelayApiResponse(relayInching(channel, durationMs));
+}
+
+void handleRelayManualChannelApi() {
+  noteRelayCommandPriority();
+  uint8_t channel = 0;
+  if (!parseRelayChannel(channel)) {
+    return;
+  }
+  if (!server.hasArg("enabled")) {
+    server.send(400, "application/json", "{\"error\":\"missing_enabled\"}");
+    return;
+  }
+  sendRelayApiResponse(relayAutomationSetChannelManualState(channel, server.arg("enabled") == "true"));
+}
+
+void handleRelayPulseChannelApi() {
+  noteRelayCommandPriority();
+  uint8_t channel = 0;
+  if (!parseRelayChannel(channel)) {
+    return;
+  }
+  sendRelayApiResponse(relayAutomationPulseChannel(channel));
 }
 
 void handleRelayAutomationStatusApi() {
@@ -2978,6 +3513,34 @@ void handleRelayAutomationSaveApi() {
 void handleRelayAutomationLoadApi() {
   const bool ok = relayAutomationLoadSettings();
   sendRelayAutomationApiResponse(ok);
+}
+
+void handleRs485TestSendApi() {
+  if (!requireAuth()) {
+    return;
+  }
+  String text = formString("text", "RS485 demo");
+  text = text.substring(0, 96);
+  const bool ok = rs485SendText(text);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(ok ? 200 : 400, "application/json", String("{\"ok\":") + (ok ? "true" : "false") + "}");
+}
+
+void handleCanTestSendApi() {
+  if (!requireAuth()) {
+    return;
+  }
+  CANBusFrame frame;
+  frame.id = static_cast<uint32_t>(boundedFormInt("id", 0x123, 0, 0x7FF));
+  frame.extended = false;
+  frame.length = static_cast<uint8_t>(boundedFormInt("length", 0, 0, 8));
+  for (uint8_t i = 0; i < frame.length; i++) {
+    const String field = "byte" + String(i);
+    frame.data[i] = static_cast<uint8_t>(boundedFormInt(field.c_str(), 0, 0, 255));
+  }
+  const bool ok = canBusSend(frame);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(ok ? 200 : 400, "application/json", String("{\"ok\":") + (ok ? "true" : "false") + "}");
 }
 
 void handleMp3PlayApi() {
@@ -3268,7 +3831,7 @@ void handleWebStorageSeedApi() {
   if (!requireAuth()) {
     return;
   }
-  const bool ok = seedWebStorageFromLittleFs();
+  const bool ok = seedWebStorageFromGeneratedAssets();
   String json = "{";
   json += "\"ok\":" + String(ok ? "true" : "false") + ",";
   json += "\"ready\":" + String(webStorageReady() ? "true" : "false") + ",";
@@ -3411,6 +3974,8 @@ void registerRoutes() {
   server.on("/api/relay", HTTP_POST, handleRelayApi);
   server.on("/api/relay/inching", HTTP_POST, handleRelayInchingApi);
   server.on("/api/relay/itching", HTTP_POST, handleRelayInchingApi);
+  server.on("/api/relay/manual", HTTP_POST, handleRelayManualChannelApi);
+  server.on("/api/relay/pulse", HTTP_POST, handleRelayPulseChannelApi);
   server.on("/api/automation/status", HTTP_GET, handleRelayAutomationStatusApi);
   server.on("/api/automation/mode", HTTP_POST, handleRelayAutomationModeApi);
   server.on("/api/automation/manual", HTTP_POST, handleRelayAutomationManualApi);
@@ -3419,6 +3984,8 @@ void registerRoutes() {
   server.on("/api/automation/garage/pulse", HTTP_POST, handleRelayAutomationGaragePulseApi);
   server.on("/api/automation/save", HTTP_POST, handleRelayAutomationSaveApi);
   server.on("/api/automation/load", HTTP_POST, handleRelayAutomationLoadApi);
+  server.on("/api/rs485/test-send", HTTP_POST, handleRs485TestSendApi);
+  server.on("/api/can/test-send", HTTP_POST, handleCanTestSendApi);
   server.on("/api/mp3/play", HTTP_POST, handleMp3PlayApi);
   server.on("/api/mp3/file", HTTP_POST, handleMp3PlayFileApi);
   server.on("/api/mp3/next", HTTP_POST, handleMp3NextApi);
@@ -3473,11 +4040,15 @@ void webServerBegin() {
 
   loadFm225RadarSettings();
   loadTdsMonitorSettings();
+  loadAirPurifierSettings();
+  loadCommunicationSettings();
+  applyCommunicationSettings();
   loadInverterSettings();
   loadMp3SoundSettings();
   loadNetworkSettings();
   loadSecuritySettings();
   loadLogSettings();
+  ensureWebStorageSeeded();
   mp3SetVolume(mp3SoundSettings.volume);
   if (mp3SoundSettings.startupSoundEnabled) {
     mp3PlayFile(MP3_SOUND_FOLDER, mp3SoundSettings.startupTrack);
@@ -3487,11 +4058,12 @@ void webServerBegin() {
   if (!tdsSettings.enabled) {
     updateTdsDisabledSnapshot();
   }
-  connectWiFi();
-
-  if (!LittleFS.begin(true)) {
-    Serial.println("LittleFS mount failed. Static dashboard files will not be available.");
+  airPurifierSnapshot.address = String(airPurifierSettings.address);
+  airPurifierSnapshot.enabled = airPurifierSettings.enabled;
+  if (!airPurifierSettings.enabled) {
+    updateAirPurifierDisabledSnapshot();
   }
+  connectWiFi();
 
   registerRoutes();
   const char *headerKeys[] = {"Cookie"};
@@ -3507,6 +4079,5 @@ void webServerLoop() {
   serviceFm225RadarPresence();
   serviceMp3SmokeAlarm();
   serviceEventLogging();
-  pollTdsMonitor();
-  pollInverters();
+  pollExternalMonitor();
 }

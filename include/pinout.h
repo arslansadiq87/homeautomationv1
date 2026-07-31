@@ -10,11 +10,9 @@ constexpr uint16_t I2C_TIMEOUT_MS = 10;
 
 constexpr uint8_t I2C_ADDRESS_BH1750 = 0x23;
 constexpr uint8_t I2C_ADDRESS_SHT3X = 0x44;
-constexpr uint8_t I2C_ADDRESS_PCF8574 = 0x20;
-constexpr bool PCF8574_AUTO_DETECT_ADDRESS = true;
+constexpr uint8_t I2C_ADDRESS_MCP23017 = 0x20;
 
-constexpr bool RELAY_ACTIVE_LOW = true;
-constexpr uint8_t RELAY_CHANNEL_COUNT = 8;
+constexpr uint8_t RELAY_CHANNEL_COUNT = 16;
 
 constexpr uint8_t PIN_PASSIVE_BUZZER = 16;
 constexpr uint16_t BUZZER_DEFAULT_FREQUENCY_HZ = 2200;
@@ -54,5 +52,12 @@ constexpr uint8_t PIN_FM225_RX = 38;
 constexpr uint8_t PIN_FM225_TX = 37;
 
 constexpr uint8_t PIN_RDM6300_RX = 17;
+
+constexpr uint8_t PIN_RS485_RX = 15;
+constexpr uint8_t PIN_RS485_TX = 18;
+constexpr uint8_t PIN_RS485_DE_RE = 48;
+
+constexpr uint8_t PIN_CAN_TX = 5;
+constexpr uint8_t PIN_CAN_RX = 6;
 
 #endif

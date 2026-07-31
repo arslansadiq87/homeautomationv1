@@ -5,3 +5,4 @@
 *.env
 include/secrets_local.h
 include/*_local.h
+include/web_assets_generated.h

@@ -6,14 +6,14 @@
 struct ModuleSnapshot {
   bool bh1750Online = false;
   bool sht3xOnline = false;
-  bool pcf8574Online = false;
+  bool mcp23017Online = false;
   bool lightValid = false;
   bool climateValid = false;
   float lux = NAN;
   float temperatureC = NAN;
   float humidityPercent = NAN;
-  uint8_t relayState = 0;
-  uint8_t pcf8574Address = 0;
+  uint16_t relayState = 0;
+  uint8_t mcp23017Address = 0;
   uint32_t i2cErrorCount = 0;
   bool mq135DigitalActive = false;
   uint16_t mq135AnalogRaw = 0;
@@ -41,7 +41,7 @@ ModuleSnapshot modulesGetSnapshot();
 bool relaySet(uint8_t channel, bool enabled);
 bool relayToggle(uint8_t channel);
 bool relayGet(uint8_t channel);
-uint8_t relayGetState();
+uint16_t relayGetState();
 
 bool relayInching(uint8_t channel, uint32_t durationMs);
 bool relayItching(uint8_t channel, uint32_t durationMs);

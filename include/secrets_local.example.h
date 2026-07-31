@@ -7,11 +7,11 @@
 #define HA_FALLBACK_AP_SSID "HomeAutomation-Setup"
 
 #define HA_DEFAULT_SOLAX_ENABLED false
-#define HA_DEFAULT_SOLAX_ADDRESS "http://192.168.100.23/"
+#define HA_DEFAULT_SOLAX_ADDRESS "http://solax.local/"
 #define HA_DEFAULT_SOLAX_PASSWORD "your-solax-password"
 
 #define HA_DEFAULT_NITROX_ENABLED false
-#define HA_DEFAULT_NITROX_HOST "192.168.100.121"
+#define HA_DEFAULT_NITROX_HOST "nitrox.local"
 
 #define HA_DEFAULT_GROWATT_ENABLED false
 #define HA_DEFAULT_GROWATT_TOKEN "your-growatt-token"

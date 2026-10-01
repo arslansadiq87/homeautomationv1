@@ -3,6 +3,9 @@
 ESP32-S3 home automation firmware built with PlatformIO and Arduino. The project provides a local web dashboard for sensors, relays, RFID access, face verification, radar presence detection, MP3 alerts, inverter monitoring, and persistent settings stored on an external Winbond W25Q128 flash chip.
 
 <p align="center">
+  <p align="center">
+  <img src="MCLOGO.png" alt="MCLogo logo" width="180">
+  </p>
   JLCMC: Quality Automation Parts, Fairly Priced. Find Your Solution Here:
   <a href="https://jlcmc.com/?from=MC2607">Click Here</a>
 </p>
